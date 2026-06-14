@@ -1,4 +1,4 @@
-"""Bitunix REST kline fetcher with retry logic."""
+"""Bitunix REST kline fetcher with retry logic and pagination (max 200 candles/request)."""
 
 import logging
 import time
@@ -12,25 +12,34 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
-# CONFIRM: verify exact endpoint and path from official Bitunix docs
-KLINE_URL: str = "https://fapi.bitunix.com/api/v1/market/kline"
+# Confirmed from official docs search: /api/v1/futures/market/kline
+KLINE_URL: str = "https://fapi.bitunix.com/api/v1/futures/market/kline"
 
-# CONFIRM: verify interval string mapping matches Bitunix API docs
+# Interval values in numeric minutes (confirmed: Python client uses "60" for 1h)
+# CONFIRM: verify "1D" value for daily — may be "1440" or "D"
 _TF_MAP: dict[str, str] = {
-    "1m": "1",
-    "5m": "5",
+    "1m":  "1",
+    "5m":  "5",
     "15m": "15",
     "30m": "30",
-    "1h": "60",
-    "4h": "240",
-    "1d": "D",
+    "1h":  "60",
+    "4h":  "240",
+    "1d":  "1440",   # CONFIRM: may be "D" or "1D"
 }
+
+# Bitunix caps at 200 candles per request — set by user
+_BATCH_SIZE: int = 200
+
+# CONFIRM: verify timestamp unit (ms assumed; change to unit="s" if wrong)
+_TIME_UNIT: str = "ms"
 
 _log = logging.getLogger(__name__)
 
 
 def _setup_error_log() -> None:
-    log_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs", "errors.log")
+    log_path = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs", "errors.log"
+    )
     if not any(isinstance(h, logging.FileHandler) for h in _log.handlers):
         handler = logging.FileHandler(log_path)
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
@@ -39,7 +48,7 @@ def _setup_error_log() -> None:
 
 
 def fetch_ohlcv(symbol: str, tf: str, limit: int) -> pd.DataFrame | None:
-    """Fetch OHLCV klines from Bitunix. Returns DataFrame or None on failure."""
+    """Fetch `limit` candles via pagination (200/batch). Returns DataFrame or None."""
     _setup_error_log()
 
     interval = _TF_MAP.get(tf)
@@ -47,12 +56,49 @@ def fetch_ohlcv(symbol: str, tf: str, limit: int) -> pd.DataFrame | None:
         _log.error("%s unsupported timeframe: %s", _ts(), tf)
         return None
 
-    params = {
-        "symbol": symbol,
-        "period": interval,  # CONFIRM: param name may differ ("interval", "granularity", etc.)
-        "limit": limit,
-    }
+    tf_ms = _tf_to_ms(tf)
+    if tf_ms is None:
+        _log.error("%s cannot compute duration for tf=%s", _ts(), tf)
+        return None
 
+    now_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
+    end_ms = now_ms
+    batches: list[pd.DataFrame] = []
+    remaining = limit
+
+    while remaining > 0:
+        batch_size = min(remaining, _BATCH_SIZE)
+        start_ms = end_ms - batch_size * tf_ms
+
+        params = {
+            "symbol": symbol,
+            "interval": interval,
+            "startTime": start_ms,
+            "endTime": end_ms,
+        }
+
+        df_batch = _fetch_one(params, symbol)
+        if df_batch is None or df_batch.empty:
+            break
+
+        batches.append(df_batch)
+        remaining -= len(df_batch)
+        end_ms = start_ms  # slide window back
+
+        if remaining > 0:
+            time.sleep(0.2)  # rate limit: 10 req/s per IP
+
+    if not batches:
+        _log.error("%s no data returned for %s", _ts(), symbol)
+        return None
+
+    df = pd.concat(batches).sort_index()
+    df = df[~df.index.duplicated(keep="last")]
+    return df.tail(limit)
+
+
+def _fetch_one(params: dict, symbol: str) -> pd.DataFrame | None:
+    """Single paginated request with retry."""
     last_exc: Exception | None = None
     for attempt, delay in enumerate(
         [0] + config.RETRY_DELAYS[: config.RETRY_ATTEMPTS - 1], start=1
@@ -63,37 +109,58 @@ def fetch_ohlcv(symbol: str, tf: str, limit: int) -> pd.DataFrame | None:
             resp = requests.get(KLINE_URL, params=params, timeout=15)
             resp.raise_for_status()
             data = resp.json()
-            return _parse_response(data, symbol)
+            if data.get("code", -1) != 0:
+                _log.error("%s API error for %s: %s", _ts(), symbol, data.get("msg"))
+                return None
+            return _parse_rows(data["data"], symbol)
         except Exception as exc:
             last_exc = exc
-            _log.error("%s fetch attempt %d/%d failed for %s: %s", _ts(), attempt, config.RETRY_ATTEMPTS, symbol, exc)
+            _log.error(
+                "%s fetch attempt %d/%d failed for %s: %s",
+                _ts(), attempt, config.RETRY_ATTEMPTS, symbol, exc,
+            )
 
     _log.error("%s all retries exhausted for %s", _ts(), symbol)
     return None
 
 
-def _parse_response(data: dict | list, symbol: str) -> pd.DataFrame | None:
-    """Parse raw API response into OHLCV DataFrame.
+def _parse_rows(rows: list[dict], symbol: str) -> pd.DataFrame | None:
+    """Parse Bitunix kline rows into OHLCV DataFrame.
 
-    CONFIRM: adapt column extraction to actual Bitunix response schema.
-    Assumed structure: data["data"] is a list of lists or dicts with
-    [timestamp, open, high, low, close, volume].
+    Confirmed response fields: time, open, high, close, low, baseVol, quoteVol
+    Note: 'close' appears BEFORE 'low' in the raw JSON — we parse by name, not position.
+    baseVol = base-currency volume (BTC for BTCUSDT) = standard trading volume.
+    quoteVol = quote-currency volume (USDT) — not used here.
     """
     try:
-        # CONFIRM: adjust key path and column order for actual Bitunix response
-        rows = data.get("data", data) if isinstance(data, dict) else data
-        df = pd.DataFrame(
-            rows,
-            columns=["timestamp", "open", "high", "low", "close", "volume"],
+        records = [
+            {
+                "timestamp": float(r["time"]),
+                "open":      float(r["open"]),
+                "high":      float(r["high"]),
+                "low":       float(r["low"]),
+                "close":     float(r["close"]),
+                "volume":    float(r["baseVol"]),  # base-currency volume
+            }
+            for r in rows
+        ]
+        df = pd.DataFrame(records)
+        df["timestamp"] = pd.to_datetime(
+            df["timestamp"], unit=_TIME_UNIT, utc=True  # CONFIRM unit if "s" vs "ms"
         )
-        df["timestamp"] = pd.to_datetime(df["timestamp"].astype(float), unit="ms", utc=True)
-        df = df.set_index("timestamp").sort_index()
-        for col in ["open", "high", "low", "close", "volume"]:
-            df[col] = df[col].astype(float)
-        return df
+        return df.set_index("timestamp").sort_index()
     except Exception as exc:
         _log.error("%s parse error for %s: %s", _ts(), symbol, exc)
         return None
+
+
+def _tf_to_ms(tf: str) -> int | None:
+    """Return timeframe duration in milliseconds."""
+    _map = {
+        "1m": 60_000, "5m": 300_000, "15m": 900_000, "30m": 1_800_000,
+        "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000,
+    }
+    return _map.get(tf)
 
 
 def _ts() -> str:

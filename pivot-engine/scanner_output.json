@@ -1,2 +1,4 @@
-[{"symbol": "BTCUSDT", "direction": "long", "ts": 1718300000},
- {"symbol": "ETHUSDT", "direction": "long", "ts": 1718300000}]
+[
+  {"symbol": "BTCUSDT", "direction": "long", "ts": 1718300000},
+  {"symbol": "ETHUSDT", "direction": "long", "ts": 1718300000}
+]
