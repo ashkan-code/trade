@@ -1,0 +1,12 @@
+[
+  {
+    "symbol": "BTCUSDT",
+    "direction": "long",
+    "flag": "test"
+  },
+  {
+    "symbol": "ETHUSDT",
+    "direction": "long",
+    "flag": "test"
+  }
+]

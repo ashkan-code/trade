@@ -1,0 +1,5 @@
+2026-06-14 16:08:54,431 WARNING 2026-06-14T16:08:54.431461+00:00 signal BLOCKED for ETHUSDT: causality: repaint audit FAILED
+2026-06-14 16:08:54,431 WARNING 2026-06-14T16:08:54.431736+00:00 signal BLOCKED for SOLUSDT: historical flag=unreliable (need valid)
+2026-06-14 16:08:54,431 WARNING 2026-06-14T16:08:54.431807+00:00 signal BLOCKED for XRPUSDT: R >= MIN_RR: no live setup found
+2026-06-14 16:09:50,814 WARNING 2026-06-14T16:09:50.814261+00:00 signal BLOCKED for BTCUSDT: R >= MIN_RR: no live setup found; historical flag=unreliable (need valid)
+2026-06-14 16:09:55,587 WARNING 2026-06-14T16:09:55.587660+00:00 signal BLOCKED for ETHUSDT: R >= MIN_RR: no live setup found; historical flag=unreliable (need valid)
