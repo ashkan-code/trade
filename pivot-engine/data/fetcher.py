@@ -15,16 +15,23 @@ import config
 # Confirmed from official docs search: /api/v1/futures/market/kline
 KLINE_URL: str = "https://fapi.bitunix.com/api/v1/futures/market/kline"
 
-# Interval values in numeric minutes (confirmed: Python client uses "60" for 1h)
-# CONFIRM: verify "1D" value for daily — may be "1440" or "D"
+# Interval strings from official Bitunix docs:
+# 1m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 3d 1w 1M
 _TF_MAP: dict[str, str] = {
-    "1m":  "1",
-    "5m":  "5",
-    "15m": "15",
-    "30m": "30",
-    "1h":  "60",
-    "4h":  "240",
-    "1d":  "1440",   # CONFIRM: may be "D" or "1D"
+    "1m":  "1m",
+    "5m":  "5m",
+    "15m": "15m",
+    "30m": "30m",
+    "1h":  "1h",
+    "2h":  "2h",
+    "4h":  "4h",
+    "6h":  "6h",
+    "8h":  "8h",
+    "12h": "12h",
+    "1d":  "1d",
+    "3d":  "3d",
+    "1w":  "1w",
+    "1M":  "1M",
 }
 
 # Bitunix caps at 200 candles per request — set by user
