@@ -37,7 +37,7 @@ _TF_MAP: dict[str, str] = {
 # Bitunix caps at 200 candles per request — set by user
 _BATCH_SIZE: int = 200
 
-# CONFIRM: verify timestamp unit (ms assumed; change to unit="s" if wrong)
+# Confirmed via live test: time field is 13-digit milliseconds (e.g. 1781492400000)
 _TIME_UNIT: str = "ms"
 
 _log = logging.getLogger(__name__)
@@ -134,10 +134,13 @@ def _fetch_one(params: dict, symbol: str) -> pd.DataFrame | None:
 def _parse_rows(rows: list[dict], symbol: str) -> pd.DataFrame | None:
     """Parse Bitunix kline rows into OHLCV DataFrame.
 
-    Confirmed response fields: time, open, high, close, low, baseVol, quoteVol
-    Note: 'close' appears BEFORE 'low' in the raw JSON — we parse by name, not position.
-    baseVol = base-currency volume (BTC for BTCUSDT) = standard trading volume.
-    quoteVol = quote-currency volume (USDT) — not used here.
+    Confirmed response fields (live test, June 2026):
+      time, open, high, close, low, baseVol, quoteVol
+
+    WARNING — Bitunix field names are SWAPPED relative to standard convention:
+      "baseVol"  = USDT value traded  (e.g. 78_057_172 for BTCUSDT)  ← do NOT use as volume
+      "quoteVol" = coin amount traded  (e.g. 1_186.97 BTC)           ← this is the real volume
+    Verified: quoteVol × close ≈ baseVol confirms the swap.
     """
     try:
         records = [
@@ -147,14 +150,12 @@ def _parse_rows(rows: list[dict], symbol: str) -> pd.DataFrame | None:
                 "high":      float(r["high"]),
                 "low":       float(r["low"]),
                 "close":     float(r["close"]),
-                "volume":    float(r["baseVol"]),  # base-currency volume
+                "volume":    float(r["quoteVol"]),  # coin volume — NOT baseVol (see docstring)
             }
             for r in rows
         ]
         df = pd.DataFrame(records)
-        df["timestamp"] = pd.to_datetime(
-            df["timestamp"], unit=_TIME_UNIT, utc=True  # CONFIRM unit if "s" vs "ms"
-        )
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit=_TIME_UNIT, utc=True)
         return df.set_index("timestamp").sort_index()
     except Exception as exc:
         _log.error("%s parse error for %s: %s", _ts(), symbol, exc)
