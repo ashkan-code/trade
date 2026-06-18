@@ -11,7 +11,6 @@ from core.ict import detect_mss, detect_order_blocks, OBDict
 from core.indicators import atr
 from core.confluence import ZoneDict
 from engine.risk import RiskDict, should_trail, compute_trail_stop
-from engine.telegram import send_alert
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +86,7 @@ def update_trail(
 def monitor_loop(positions: list[PositionDict]) -> None:
     """
     Daemon loop — checks open positions every CACHE_TTL_SECONDS.
-    Sends Telegram alert on invalidation or trail-stop update.
+    Logs invalidation and trail-stop updates to stdout/log.
     """
     from data.bitunix import get_candles  # lazy import to avoid circular
 
@@ -103,8 +102,7 @@ def monitor_loop(positions: list[PositionDict]) -> None:
 
                 reason = check_invalidation(pos, df_1h)
                 if reason:
-                    msg = f"⚠️ POSITION INVALIDATED — {symbol} {pos['direction'].upper()}\n{reason}"
-                    send_alert(msg)
+                    msg = f"POSITION INVALIDATED — {symbol} {pos['direction'].upper()}: {reason}"
                     logger.warning(msg)
                     positions.remove(pos)
                     continue
@@ -112,10 +110,10 @@ def monitor_loop(positions: list[PositionDict]) -> None:
                 updated = update_trail(pos, current_price, atr_val)
                 if updated["trail_active"] and updated["current_stop"] != pos["current_stop"]:
                     msg = (
-                        f"📌 TRAIL STOP UPDATE — {symbol}\n"
-                        f"New stop: {updated['current_stop']:.6g}"
+                        f"TRAIL STOP UPDATE — {symbol} "
+                        f"new stop: {updated['current_stop']:.6g}"
                     )
-                    send_alert(msg)
+                    logger.info(msg)
                     positions[positions.index(pos)] = updated  # type: ignore[type-var]
 
             except Exception as exc:

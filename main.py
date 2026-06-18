@@ -11,7 +11,6 @@ from datetime import date, datetime, timezone
 
 import config
 from engine.scanner import run_scan
-from engine.telegram import send_signal, send_alert
 from engine.monitor import monitor_loop, PositionDict
 
 logging.basicConfig(
@@ -24,10 +23,21 @@ logger = logging.getLogger("main")
 SCAN_INTERVAL = 300  # 5 minutes (aligned with LTF=5m)
 
 
-def main(dry_run: bool = False) -> None:
-    """
-    dry_run=True: print signals to stdout, do not send to Telegram.
-    """
+def _print_signal(sig: dict) -> None:
+    print(f"\n{'='*50}")
+    print(f"SIGNAL: {sig['symbol']} {sig['direction'].upper()}")
+    print(f"  Entry:  {sig['entry']:.6g}")
+    print(f"  Stop:   {sig['stop']:.6g}")
+    print(f"  Target: {sig['target']:.6g}")
+    print(f"  R:R:    {sig['rr']:.2f}")
+    print(f"  Score:  {sig['score']*100:.0f}%")
+    print(f"  Zone:   {sig['zone_type']}")
+    print(f"  RSI:    {'✓' if sig['rsi_confirm'] else '✗'}  "
+          f"MACD: {'✓' if sig['macd_confirm'] else '✗'}")
+    print(f"  Time:   {sig['timestamp']}")
+
+
+def main() -> None:
     daily_state = {
         "date": date.today(),
         "signals_sent": 0,
@@ -67,28 +77,13 @@ def main(dry_run: bool = False) -> None:
         top_signals = signals[:remaining]
 
         for sig in top_signals:
-            if dry_run:
-                print(f"\n{'='*50}")
-                print(f"SIGNAL: {sig['symbol']} {sig['direction'].upper()}")
-                print(f"  Entry:  {sig['entry']:.6g}")
-                print(f"  Stop:   {sig['stop']:.6g}")
-                print(f"  Target: {sig['target']:.6g}")
-                print(f"  R:R:    {sig['rr']:.2f}")
-                print(f"  Score:  {sig['score']*100:.0f}%")
-                print(f"  Zone:   {sig['zone_type']}")
-                daily_state["signals_sent"] += 1
-            else:
-                if send_signal(sig):
-                    daily_state["signals_sent"] += 1
-                    logger.info("Signal sent: %s %s score=%.2f",
-                                sig["symbol"], sig["direction"], sig["score"])
+            _print_signal(sig)
+            logger.info("Signal: %s %s score=%.2f",
+                        sig["symbol"], sig["direction"], sig["score"])
+            daily_state["signals_sent"] += 1
 
         time.sleep(SCAN_INTERVAL)
 
 
 if __name__ == "__main__":
-    import sys
-    dry = "--dry-run" in sys.argv
-    if dry:
-        logger.info("Running in DRY-RUN mode (no Telegram sends)")
-    main(dry_run=dry)
+    main()

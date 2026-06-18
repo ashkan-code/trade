@@ -12,7 +12,6 @@ def test_required_attributes_exist():
         "SCORE_THRESHOLD", "MAX_POSITIONS_PER_DAY",
         "CACHE_TTL_SECONDS", "RATE_LIMIT_DELAY", "CANDLE_LIMIT",
         "BITUNIX_BASE_URL", "BTC_SYMBOL",
-        "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID",
     ]
     for attr in required:
         assert hasattr(config, attr), f"config missing: {attr}"
