@@ -306,14 +306,14 @@ def detect_liquidity(df: pd.DataFrame, atr_series: pd.Series) -> list[LiqDict]:
             if p - group[0] <= margin:
                 group.append(p)
             else:
-                if len(group) >= 3:
+                if len(group) >= 2:
                     result.append(LiqDict(
                         type=liq_type,
                         price=float(np.mean(group)),
                         touches=len(group),
                     ))
                 group = [p]
-        if len(group) >= 3:
+        if len(group) >= 2:
             result.append(LiqDict(
                 type=liq_type,
                 price=float(np.mean(group)),

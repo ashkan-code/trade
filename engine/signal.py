@@ -7,7 +7,8 @@ from typing import Optional, TypedDict
 import pandas as pd
 
 import config
-from core.ict import detect_mss, detect_order_blocks, detect_fvg, detect_liquidity
+from core.ict import (detect_mss, detect_order_blocks, detect_fvg,
+                     detect_liquidity, _swing_highs, _swing_lows, LiqDict)
 from core.indicators import atr
 from core.confluence import (
     is_aligned, find_best_zone, zone_triggered, compute_htf_confirms,
@@ -93,6 +94,23 @@ def generate_signal(
     # Step 7: Risk calculation
     atr_1h = atr(df_1h)
     liq_pools = detect_liquidity(df_1h, atr_1h)
+
+    # Fallback: nearest swing extreme as target when no liquidity pool found
+    if not liq_pools:
+        sh = _swing_highs(df_4h, config.SWING_LEN)
+        sl = _swing_lows(df_4h, config.SWING_LEN)
+        if direction == "bullish":
+            targets = [df_4h["high"].iloc[i] for i in range(len(df_4h))
+                       if sh.iloc[i] and df_4h["high"].iloc[i] > entry_price]
+            if targets:
+                liq_pools = [LiqDict(type="buyside", price=min(targets), touches=1)]
+        else:
+            targets = [df_4h["low"].iloc[i] for i in range(len(df_4h))
+                       if sl.iloc[i] and df_4h["low"].iloc[i] < entry_price]
+            if targets:
+                liq_pools = [LiqDict(type="sellside", price=max(targets), touches=1)]
+        if liq_pools:
+            logger.debug("%s: using swing-extreme fallback target %s", symbol, liq_pools[0]["price"])
 
     ob_1h = zone.get("ob_1h")
     if ob_1h is None:
