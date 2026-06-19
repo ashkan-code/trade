@@ -49,6 +49,9 @@ MIN_TRADES: int = 30             # lowered from 100 (multi-TF signals are rarer)
 FOLDS: int = 5
 WARMUP: int = 50
 
+# Scanner
+TOP_N: int = 50   # top symbols by 24h USDT turnover to scan and backtest
+
 # Network
 RETRY_ATTEMPTS: int = 3
 RETRY_DELAYS: list[int] = [5, 10, 30]

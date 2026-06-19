@@ -1,36 +1,36 @@
 """
-Download 6 months of OHLCV history from Bitunix and save to data/historical/.
+Download OHLCV history for the top-N USDT-M futures by 24h volume from Bitunix.
 
 Usage (from pivot-engine/ directory):
     python scripts/download_history.py
 
+Steps:
+  1. Fetch live tickers → pick top TOP_N symbols by 24h USDT turnover.
+  2. BTCUSDT always included first (direction filter, never traded).
+  3. Download 6 months of 4h + 1h + 5m per alt; 4h + 1h for BTC.
+  4. RESUMABLE: existing CSVs are skipped — interrupt and re-run freely.
+  5. Saves data/top_symbols.json so main.py can auto-scan without scanner_output.json.
+
 Output files:
-    data/historical/BTCUSDT_4h.csv
-    data/historical/ETHUSDT_4h.csv  ... and so on
-
-Each CSV: timestamp,open,high,low,close,volume  (UTC, ascending)
-
-Memory strategy: one (symbol, timeframe) at a time — each DataFrame is freed
-before the next request. Safe on Termux with limited RAM.
+    data/historical/<SYMBOL>_<tf>.csv   (timestamp,open,high,low,close,volume  UTC ascending)
+    data/top_symbols.json               (ordered list of top-N symbols)
 """
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import time
 from datetime import datetime, timezone
 
-# Allow running as `python scripts/download_history.py` from pivot-engine/
 _BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _BASE)
 
-# ── Load .env before importing anything that reads config ──────────────────────
+
 def _load_dotenv() -> None:
     env_path = os.path.join(_BASE, ".env")
     if not os.path.exists(env_path):
-        print(f"[INFO] No .env found at {env_path} — using environment variables as-is.")
-        print("       Market data is public; keys only needed for auth'd endpoints.")
         return
     with open(env_path) as f:
         for line in f:
@@ -39,76 +39,67 @@ def _load_dotenv() -> None:
                 continue
             key, _, val = line.partition("=")
             os.environ.setdefault(key.strip(), val.strip())
-    print(f"[INFO] Loaded .env from {env_path}")
+
 
 _load_dotenv()
 
 import requests
 import pandas as pd
+import config
+from data.fetcher import get_top_symbols
 
 # ── Constants ──────────────────────────────────────────────────────────────────
 
 BASE_URL = os.environ.get("BITUNIX_BASE_URL", "https://fapi.bitunix.com").rstrip("/")
 KLINE_URL = f"{BASE_URL}/api/v1/futures/market/kline"
 
-# BTC is direction filter — still needs 4H and 1H for MSS/OB detection.
-# 5m for BTC is skipped (scanner never uses BTC 5m).
-SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "BNBUSDT", "XRPUSDT"]
-
-# Timeframes to download per symbol.
-# BTC gets 4h + 1h only (no 5m needed — it's a direction filter, not traded).
-# Alts get all three.
-TF_CONFIG: dict[str, list[str]] = {
-    "BTCUSDT": ["4h", "1h"],
-    "ETHUSDT": ["4h", "1h", "5m"],
-    "SOLUSDT": ["4h", "1h", "5m"],
-    "BNBUSDT": ["4h", "1h", "5m"],
-    "XRPUSDT": ["4h", "1h", "5m"],
-}
-
-# 6 months ≈ 183 days
 MONTHS = 6
 DAYS = 183
 
-# Candle counts for 6 months (used to compute expected rows for sanity check)
-# 4h:  183 * 6  = 1098   bars
-# 1h:  183 * 24 = 4392   bars
-# 5m:  183 * 288= 52704  bars
 EXPECTED: dict[str, int] = {
-    "4h":  DAYS * 6,
-    "1h":  DAYS * 24,
-    "5m":  DAYS * 288,
+    "4h": DAYS * 6,
+    "1h": DAYS * 24,
+    "5m": DAYS * 288,
 }
 
-BATCH_SIZE = 200       # Bitunix hard cap per request
-RATE_DELAY = 0.25      # seconds between requests (4 req/s, well under 10 req/s limit)
+BATCH_SIZE = 200
+RATE_DELAY = 0.25
 RETRY_DELAYS = [5, 15, 30]
 
-# Interval string map (Bitunix API values)
-TF_API: dict[str, str] = {
-    "5m":  "5m",
-    "1h":  "1h",
-    "4h":  "4h",
-}
-
-# Milliseconds per candle
+TF_API: dict[str, str] = {"5m": "5m", "1h": "1h", "4h": "4h"}
 TF_MS: dict[str, int] = {
-    "5m":  5  * 60 * 1000,
-    "1h":  60 * 60 * 1000,
-    "4h":  4  * 60 * 60 * 1000,
+    "5m":  5  * 60 * 1_000,
+    "1h":  60 * 60 * 1_000,
+    "4h":  4  * 60 * 60 * 1_000,
 }
 
 OUT_DIR = os.path.join(_BASE, "data", "historical")
+TOP_SYMBOLS_JSON = os.path.join(_BASE, "data", "top_symbols.json")
 
 
-# ── Helpers ────────────────────────────────────────────────────────────────────
+# ── Symbol selection ───────────────────────────────────────────────────────────
+
+def _build_tf_config(symbols: list[str]) -> dict[str, list[str]]:
+    """BTC gets 4h+1h only (direction filter — 5m not needed).
+    All alts get 4h+1h+5m.
+    """
+    cfg: dict[str, list[str]] = {}
+    for sym in symbols:
+        cfg[sym] = ["4h", "1h"] if sym == config.BTC_SYMBOL else ["4h", "1h", "5m"]
+    return cfg
+
+
+# ── Network helpers ────────────────────────────────────────────────────────────
 
 def _now_ms() -> int:
     return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
+def _ms_to_utc(ms: int) -> str:
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+
 def _fetch_batch(symbol: str, tf: str, start_ms: int, end_ms: int) -> list[dict] | None:
-    """Single request. Returns raw row list or None on failure."""
     params = {
         "symbol": symbol,
         "interval": TF_API[tf],
@@ -123,61 +114,51 @@ def _fetch_batch(symbol: str, tf: str, start_ms: int, end_ms: int) -> list[dict]
         try:
             resp = requests.get(KLINE_URL, params=params, timeout=20)
             if resp.status_code != 200:
-                print(f"  [ERROR] HTTP {resp.status_code} for {symbol}/{tf} "
-                      f"start={start_ms} — body: {resp.text[:300]}")
+                print(f"  [ERROR] HTTP {resp.status_code} for {symbol}/{tf} — {resp.text[:200]}")
                 return None
             body = resp.json()
-            code = body.get("code", -1)
-            if code != 0:
-                msg = body.get("msg", "(no msg)")
-                print(f"  [ERROR] API code={code} for {symbol}/{tf}: {msg}")
+            if body.get("code", -1) != 0:
+                print(f"  [ERROR] API code={body.get('code')} for {symbol}/{tf}: {body.get('msg')}")
                 return None
-            rows = body.get("data", [])
-            return rows
+            return body.get("data", [])
         except requests.exceptions.Timeout:
             last_exc = Exception("timeout after 20s")
-        except requests.exceptions.ConnectionError as exc:
-            last_exc = exc
         except Exception as exc:
             last_exc = exc
         print(f"  [WARN]  attempt {attempt} failed for {symbol}/{tf}: {last_exc}")
 
-    print(f"  [ERROR] all {len(RETRY_DELAYS)+1} attempts failed for {symbol}/{tf}: {last_exc}")
+    print(f"  [ERROR] all attempts exhausted for {symbol}/{tf}: {last_exc}")
     return None
 
 
 def _parse_rows(rows: list[dict]) -> list[dict]:
-    """Parse Bitunix kline rows.
-
-    Confirmed field names (live test June 2026):
-      time, open, high, low, close, quoteVol (coin amount), baseVol (USDT value)
-    quoteVol = coin volume (BTC qty, ETH qty, etc.) — this is what we store as 'volume'.
-    """
     out = []
     for r in rows:
         try:
             out.append({
                 "timestamp": int(float(r["time"])),
-                "open":      float(r["open"]),
-                "high":      float(r["high"]),
-                "low":       float(r["low"]),
-                "close":     float(r["close"]),
-                "volume":    float(r["quoteVol"]),
+                "open":   float(r["open"]),
+                "high":   float(r["high"]),
+                "low":    float(r["low"]),
+                "close":  float(r["close"]),
+                "volume": float(r["quoteVol"]),  # coin amount; baseVol = USDT value (naming is swapped)
             })
         except (KeyError, ValueError, TypeError) as exc:
             print(f"  [WARN]  skipped malformed row {r}: {exc}")
     return out
 
 
-def download(symbol: str, tf: str) -> bool:
-    """Download full 6-month history for one (symbol, tf) pair.
+# ── Download one (symbol, tf) ──────────────────────────────────────────────────
 
-    Paginates backwards from now until DAYS * TF_MS[tf] covered.
-    Frees all intermediate data after saving — one file at a time.
+def download(symbol: str, tf: str) -> bool:
+    """Download full 6-month history for one (symbol, tf). Paginates backwards.
+
+    Memory-safe: all rows held in a plain list; DataFrame built once at the end
+    and freed after saving. Safe on Termux with limited RAM.
     Returns True on success.
     """
     tf_ms = TF_MS[tf]
-    total_ms = DAYS * 24 * 60 * 60 * 1000
+    total_ms = DAYS * 24 * 60 * 60 * 1_000
     end_ms = _now_ms()
     start_target = end_ms - total_ms
 
@@ -185,19 +166,16 @@ def download(symbol: str, tf: str) -> bool:
     batches_fetched = 0
     window_end = end_ms
 
-    print(f"  Downloading {symbol} {tf} …")
-    print(f"  Target: {DAYS} days = ~{EXPECTED[tf]} candles "
-          f"({DAYS * 24 * 60 * 60 * 1000 // tf_ms} theoretical)")
+    print(f"  Downloading {symbol} {tf} … (target ~{EXPECTED[tf]:,} candles)")
 
     while window_end > start_target:
         window_start = max(window_end - BATCH_SIZE * tf_ms, start_target)
 
         rows = _fetch_batch(symbol, tf, window_start, window_end)
         if rows is None:
-            return False  # error already printed
+            return False
         if not rows:
-            # No data in this window — could be exchange outage or data gap
-            print(f"  [WARN]  empty batch at window {window_start}–{window_end}, skipping back")
+            print(f"  [WARN]  empty batch at {_ms_to_utc(window_start)}–{_ms_to_utc(window_end)}, skipping")
             window_end = window_start
             time.sleep(RATE_DELAY)
             continue
@@ -208,19 +186,21 @@ def download(symbol: str, tf: str) -> bool:
 
         oldest_ts = min(r["timestamp"] for r in parsed)
         pct = max(0, 100 * (end_ms - oldest_ts) / total_ms)
-        print(f"  batch {batches_fetched:3d}: got {len(parsed):4d} rows, "
-              f"oldest={_ms_to_utc(oldest_ts)}  [{pct:.0f}% covered]", end="\r")
+        print(
+            f"  batch {batches_fetched:3d}: {len(parsed):4d} rows, "
+            f"oldest={_ms_to_utc(oldest_ts)}  [{pct:.0f}%]",
+            end="\r",
+        )
 
         window_end = window_start
         time.sleep(RATE_DELAY)
 
-    print()  # newline after \r progress
+    print()
 
     if not all_rows:
-        print(f"  [ERROR] zero rows collected for {symbol} {tf}")
+        print(f"  [ERROR] zero rows for {symbol} {tf}")
         return False
 
-    # Sort, deduplicate, drop open (last) candle
     all_rows.sort(key=lambda r: r["timestamp"])
     seen: set[int] = set()
     deduped: list[dict] = []
@@ -228,61 +208,72 @@ def download(symbol: str, tf: str) -> bool:
         if r["timestamp"] not in seen:
             seen.add(r["timestamp"])
             deduped.append(r)
-    # Drop last row (open/incomplete candle)
     if len(deduped) > 1:
-        deduped = deduped[:-1]
+        deduped = deduped[:-1]  # drop last (open/incomplete) candle
 
-    # Build DataFrame, convert timestamp to UTC string for CSV portability
-    import pandas as pd
     df = pd.DataFrame(deduped)
     df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
     df = df[["timestamp", "open", "high", "low", "close", "volume"]]
 
-    # Save
-    fname = f"{symbol}_{tf}.csv"
-    fpath = os.path.join(OUT_DIR, fname)
+    fpath = os.path.join(OUT_DIR, f"{symbol}_{tf}.csv")
     df.to_csv(fpath, index=False)
 
     expected = EXPECTED[tf]
-    pct_coverage = 100 * len(df) / expected if expected else 0
+    pct_cov = 100 * len(df) / expected if expected else 0
     status = "✓" if len(df) >= expected * 0.90 else "⚠ LOW"
-    print(f"  {status}  {fname}: {len(df):,} rows  "
-          f"(expected ~{expected:,}, {pct_coverage:.0f}% coverage)")
-    print(f"     first: {df['timestamp'].iloc[0]}  last: {df['timestamp'].iloc[-1]}")
+    print(
+        f"  {status}  {symbol}_{tf}.csv: {len(df):,} rows  "
+        f"(~{expected:,} expected, {pct_cov:.0f}% coverage)"
+    )
+    print(f"       first: {df['timestamp'].iloc[0]}  last: {df['timestamp'].iloc[-1]}")
 
-    # Free memory before next symbol
     del df, all_rows, deduped, seen
     return True
-
-
-def _ms_to_utc(ms: int) -> str:
-    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M")
 
 
 # ── Main ───────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     os.makedirs(OUT_DIR, exist_ok=True)
-    print(f"\nBitunix history downloader — target: {MONTHS} months ({DAYS} days)")
-    print(f"Output dir: {OUT_DIR}\n")
 
-    total = sum(len(tfs) for tfs in TF_CONFIG.values())
+    print(f"\nBitunix history downloader — top {config.TOP_N} symbols by 24h USDT turnover")
+    print(f"Period  : {MONTHS} months ({DAYS} days)")
+    print(f"Output  : {OUT_DIR}\n")
+
+    # ── Step 1: fetch ranked symbol list ──────────────────────────────────────
+    print(f"Fetching top {config.TOP_N} symbols from Bitunix tickers …")
+    symbols = get_top_symbols(config.TOP_N)
+    if not symbols:
+        print("[ERROR] Could not fetch symbol list from API. Check network and retry.")
+        sys.exit(1)
+
+    print(f"Got {len(symbols)} symbols. Top 10: {symbols[:10]}\n")
+
+    # Save so main.py can auto-scan without scanner_output.json
+    with open(TOP_SYMBOLS_JSON, "w") as f:
+        json.dump(symbols, f, indent=2)
+    print(f"Saved {TOP_SYMBOLS_JSON}\n")
+
+    tf_config = _build_tf_config(symbols)
+    total = sum(len(tfs) for tfs in tf_config.values())
+
+    # ── Step 2: download (resumable) ──────────────────────────────────────────
     done = 0
     failed: list[str] = []
 
-    for symbol in SYMBOLS:
-        tfs = TF_CONFIG[symbol]
+    for symbol in symbols:
+        tfs = tf_config[symbol]
         print(f"{'─'*60}")
         print(f"Symbol: {symbol}  timeframes: {', '.join(tfs)}")
+
         for tf in tfs:
             out_path = os.path.join(OUT_DIR, f"{symbol}_{tf}.csv")
             if os.path.exists(out_path):
-                import pandas as pd
-                existing = pd.read_csv(out_path, usecols=["timestamp"])
-                row_count = len(existing)
-                del existing
-                print(f"  [SKIP] {symbol}_{tf}.csv already exists ({row_count:,} rows) "
-                      f"— delete to re-download")
+                try:
+                    row_count = sum(1 for _ in open(out_path)) - 1  # fast line count
+                except Exception:
+                    row_count = -1
+                print(f"  [SKIP] {symbol}_{tf}.csv already exists ({row_count:,} rows) — delete to re-download")
                 done += 1
                 continue
 
@@ -291,23 +282,22 @@ def main() -> None:
             if not ok:
                 failed.append(f"{symbol}_{tf}")
 
-            # Pause between timeframes for the same symbol
             if tf != tfs[-1]:
                 time.sleep(1.0)
 
-        # Longer pause between symbols
-        if symbol != SYMBOLS[-1]:
-            print(f"  [pause 2s before next symbol]")
+        if symbol != symbols[-1]:
             time.sleep(2.0)
 
+    # ── Summary ───────────────────────────────────────────────────────────────
     print(f"\n{'='*60}")
-    print(f"Done: {done - len(failed)}/{total} succeeded")
+    print(f"Done: {done - len(failed)}/{total} files")
     if failed:
-        print(f"FAILED: {', '.join(failed)}")
-        print("Re-run the script — it skips already-downloaded files.")
+        print(f"FAILED ({len(failed)}): {', '.join(failed)}")
+        print("Re-run the script — already-downloaded files are skipped automatically.")
     else:
-        print("All downloads complete. Run the backtest:")
-        print("  python main.py")
+        print("All downloads complete.")
+    print(f"\nNext step:")
+    print(f"  python main.py   (reads data/top_symbols.json if scanner_output.json absent)")
     print(f"{'='*60}\n")
 
 

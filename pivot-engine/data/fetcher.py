@@ -14,6 +14,7 @@ import config
 
 # Confirmed from official docs search: /api/v1/futures/market/kline
 KLINE_URL: str = "https://fapi.bitunix.com/api/v1/futures/market/kline"
+TICKERS_URL: str = "https://fapi.bitunix.com/api/v1/futures/market/tickers"
 
 # Interval strings from official Bitunix docs:
 # 1m 5m 15m 30m 1h 2h 4h 6h 8h 12h 1d 3d 1w 1M
@@ -169,6 +170,56 @@ def _tf_to_ms(tf: str) -> int | None:
         "1h": 3_600_000, "4h": 14_400_000, "1d": 86_400_000,
     }
     return _map.get(tf)
+
+
+def get_top_symbols(n: int | None = None) -> list[str]:
+    """Fetch all USDT-M futures tickers, rank by 24h USDT turnover, return top n.
+
+    BTCUSDT is always first (direction filter — never traded but always needed).
+    n defaults to config.TOP_N.
+
+    Returns [] on API failure.
+    """
+    _setup_error_log()
+    if n is None:
+        n = config.TOP_N
+
+    try:
+        resp = requests.get(TICKERS_URL, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        if data.get("code", -1) != 0:
+            _log.error("%s tickers API error: %s", _ts(), data.get("msg"))
+            return []
+        tickers: list[dict] = data.get("data", [])
+    except Exception as exc:
+        _log.error("%s tickers fetch failed: %s", _ts(), exc)
+        return []
+
+    # Keep only USDT-margined pairs
+    usdt = [t for t in tickers if str(t.get("symbol", "")).endswith("USDT")]
+
+    def _usdt_volume(t: dict) -> float:
+        # Bitunix ticker field names vary; try in order of most likely to be USDT turnover
+        for field in ("amount24h", "quoteVol", "baseVol", "vol24h", "vol"):
+            v = t.get(field)
+            if v is not None:
+                try:
+                    return float(v)
+                except (ValueError, TypeError):
+                    pass
+        return 0.0
+
+    usdt.sort(key=_usdt_volume, reverse=True)
+
+    top = [t["symbol"] for t in usdt[:n] if "symbol" in t]
+
+    # BTC always leads — it's the direction filter, not an alt signal
+    if "BTCUSDT" in top:
+        top.remove("BTCUSDT")
+    top.insert(0, "BTCUSDT")
+
+    return top
 
 
 def _ts() -> str:
