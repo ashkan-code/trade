@@ -121,21 +121,29 @@ def _process(
         last_1h_idx = len(df_1h) - 1
         rejection = find_rejection(df_1h, last_1h_idx, zones_1h)
 
+    # Gate 3: RSI + MACD advisory (uses 1H if available, else 4H)
+    ref_df = df_1h if df_1h is not None else df_4h
+    gate3_ok = gate3_passes(ref_df, direction)
+    if not gate3_ok:
+        print(f"  [Gate3] RSI/MACD advisory: not confirmed for {symbol} [{direction}]")
+
     live_setup: Setup | None = None
     if rejection is not None:
         zone = rejection.zone
-        ref_df = df_1h if df_1h is not None else df_4h
         atr_val = atr_scalar(df_4h, config.ATR_PERIOD)
         sl_price = compute_sl(direction, rejection.shadow_extreme, atr_val)
-        tp_price = find_tp(direction, rejection.entry, sl_price, ref_df)
+
+        # Gate 4: 5m entry refinement (never cancels a confirmed rejection)
+        if df_5m is not None:
+            refined_entry = optimize_entry(df_5m, zone, direction, df_4h.index[-1])
+        else:
+            refined_entry = rejection.entry
+
+        ref_for_tp = df_1h if df_1h is not None else df_4h
+        tp_price = find_tp(direction, refined_entry, sl_price, ref_for_tp)
         if tp_price is not None:
-            rr = compute_rr(rejection.entry, sl_price, tp_price)
+            rr = compute_rr(refined_entry, sl_price, tp_price)
             if rr >= config.MIN_RR:
-                # Gate 4: 5m entry
-                if df_5m is not None:
-                    entry = optimize_entry(df_5m, zone, direction, df_4h.index[-1])
-                else:
-                    entry = rejection.entry
                 live_setup = Setup(
                     entry_low=zone.zone_low,
                     entry_high=zone.zone_high,
