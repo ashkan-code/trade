@@ -172,18 +172,9 @@ def _tf_to_ms(tf: str) -> int | None:
     return _map.get(tf)
 
 
-def get_top_symbols(n: int | None = None) -> list[str]:
-    """Fetch all USDT-M futures tickers, rank by 24h USDT turnover, return top n.
-
-    BTCUSDT is always first (direction filter — never traded but always needed).
-    n defaults to config.TOP_N.
-
-    Returns [] on API failure.
-    """
+def _fetch_tickers() -> list[dict]:
+    """Fetch all USDT-M tickers from Bitunix. Returns [] on failure."""
     _setup_error_log()
-    if n is None:
-        n = config.TOP_N
-
     try:
         resp = requests.get(TICKERS_URL, timeout=15)
         resp.raise_for_status()
@@ -192,34 +183,68 @@ def get_top_symbols(n: int | None = None) -> list[str]:
             _log.error("%s tickers API error: %s", _ts(), data.get("msg"))
             return []
         tickers: list[dict] = data.get("data", [])
+        return [t for t in tickers if str(t.get("symbol", "")).endswith("USDT")]
     except Exception as exc:
         _log.error("%s tickers fetch failed: %s", _ts(), exc)
         return []
 
-    # Keep only USDT-margined pairs
-    usdt = [t for t in tickers if str(t.get("symbol", "")).endswith("USDT")]
 
-    def _usdt_volume(t: dict) -> float:
-        # Bitunix ticker field names vary; try in order of most likely to be USDT turnover
-        for field in ("amount24h", "quoteVol", "baseVol", "vol24h", "vol"):
-            v = t.get(field)
-            if v is not None:
-                try:
-                    return float(v)
-                except (ValueError, TypeError):
-                    pass
-        return 0.0
+def _usdt_volume(t: dict) -> float:
+    """Extract 24h USDT turnover from a ticker dict (tries multiple field names)."""
+    for field in ("amount24h", "quoteVol", "baseVol", "vol24h", "vol"):
+        v = t.get(field)
+        if v is not None:
+            try:
+                return float(v)
+            except (ValueError, TypeError):
+                pass
+    return 0.0
 
-    usdt.sort(key=_usdt_volume, reverse=True)
 
-    top = [t["symbol"] for t in usdt[:n] if "symbol" in t]
+def _prepend_btc(symbols: list[str]) -> list[str]:
+    """Ensure BTC is always first (direction filter)."""
+    if config.BTC_SYMBOL in symbols:
+        symbols.remove(config.BTC_SYMBOL)
+    symbols.insert(0, config.BTC_SYMBOL)
+    return symbols
 
-    # BTC always leads — it's the direction filter, not an alt signal
-    if config.BTC_SYMBOL in top:
-        top.remove(config.BTC_SYMBOL)
-    top.insert(0, config.BTC_SYMBOL)
 
-    return top
+def get_all_symbols(min_volume_usd: float | None = None) -> list[str]:
+    """Return ALL USDT-M futures symbols with 24h USDT turnover >= min_volume_usd.
+
+    Sorted descending by volume. BTCUSDT is always first.
+    min_volume_usd defaults to config.MIN_VOLUME_USD.
+    Returns [] on API failure.
+    """
+    if min_volume_usd is None:
+        min_volume_usd = config.MIN_VOLUME_USD
+
+    tickers = _fetch_tickers()
+    if not tickers:
+        return []
+
+    filtered = [t for t in tickers if _usdt_volume(t) >= min_volume_usd]
+    filtered.sort(key=_usdt_volume, reverse=True)
+    symbols = [t["symbol"] for t in filtered if "symbol" in t]
+    return _prepend_btc(symbols)
+
+
+def get_top_symbols(n: int | None = None) -> list[str]:
+    """Return top-n USDT-M futures symbols ranked by 24h USDT turnover.
+
+    BTCUSDT is always first. n defaults to config.TOP_N.
+    Returns [] on API failure.
+    """
+    if n is None:
+        n = config.TOP_N
+
+    tickers = _fetch_tickers()
+    if not tickers:
+        return []
+
+    tickers.sort(key=_usdt_volume, reverse=True)
+    symbols = [t["symbol"] for t in tickers[:n] if "symbol" in t]
+    return _prepend_btc(symbols)
 
 
 def _ts() -> str:

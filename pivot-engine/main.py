@@ -53,9 +53,11 @@ _log = logging.getLogger(__name__)
 
 def main() -> None:
     if not OFFLINE:
-        # Live scan: delegates to live.py — same logic, no code duplication
+        # Live scan: fetch symbols from API, run gates on live data
         from live import scan
-        scan(top_n=config.TOP_N)
+        from data.fetcher import get_all_symbols
+        symbols = get_all_symbols()
+        scan(symbols)
         return
 
     # Load BTC first — direction needed to build scanner items from top_symbols.json

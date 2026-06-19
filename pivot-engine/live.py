@@ -1,4 +1,4 @@
-"""Live scanner — scans top-N USDT-M futures from Bitunix in real time.
+"""Live scanner — scans USDT-M futures from Bitunix in real time.
 
 Gates run on live API data (no CSVs):
   Gate 0: BTC 4H MSS direction
@@ -9,8 +9,9 @@ Gates run on live API data (no CSVs):
 No backtest metrics gate — this is a live screener, not a backtest validator.
 
 Usage:
-    python live.py
-    python live.py --top 30      # override TOP_N for this run
+    python live.py                # scan all symbols >= MIN_VOLUME_USD
+    python live.py --top 30       # scan only top 30 by volume
+    python live.py --min-vol 10m  # custom minimum volume (10 million USD)
 """
 
 from __future__ import annotations
@@ -25,7 +26,7 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
-from data.fetcher import fetch_ohlcv, get_top_symbols
+from data.fetcher import fetch_ohlcv, get_all_symbols, get_top_symbols
 from engine.ict import detect_mss, atr_scalar
 from engine.zones import find_active_zones, find_rejection
 from engine.indicators import gate3_passes
@@ -44,22 +45,25 @@ logging.basicConfig(
 )
 _log = logging.getLogger(__name__)
 
-# Candle counts for live fetch (enough for ICT detection + warmup)
 _CANDLES: dict[str, int] = {
-    "4h": 300,   # ~50 days
+    "4h": 300,   # ~50 days — enough for OB/FVG detection + warmup
     "1h": 500,   # ~21 days
-    "5m": 288,   # ~1 day (entry refinement only)
+    "5m": 288,   # ~1 day — entry refinement only
 }
 
 _RATE_DELAY = 0.25  # seconds between API requests
 
 
-def scan(top_n: int) -> list[dict]:
-    """Run full live scan. Returns list of active signal dicts."""
+def scan(symbols: list[str]) -> list[dict]:
+    """Scan a pre-built list of symbols. Returns list of active signal dicts.
+
+    `symbols` must include config.BTC_SYMBOL as the first entry.
+    """
+    alts = [s for s in symbols if s != config.BTC_SYMBOL]
 
     print(f"\n{'='*60}")
     print(f"LIVE SCANNER  {_ts()}")
-    print(f"TOP_N={top_n}  MIN_RR={config.MIN_RR}  "
+    print(f"Symbols: {len(alts)} alts  MIN_RR={config.MIN_RR}  "
           f"HTF={config.HTF}  HTF_ALT={config.HTF_ALT}")
     print(f"{'='*60}\n")
 
@@ -72,29 +76,22 @@ def scan(top_n: int) -> list[dict]:
 
     btc_direction: Direction | None = detect_mss(df_btc)
     if btc_direction is None:
-        print("      BTC MSS undetermined — no dominant structure found. Aborting.")
+        print("      BTC MSS undetermined — no dominant structure. Aborting.")
         return []
 
     print(f"      BTC direction: {btc_direction.upper()}")
 
-    # ── Step 2: symbol list ────────────────────────────────────────────────────
-    print(f"\n[2/3] Fetching top {top_n} symbols by 24h USDT turnover …")
-    symbols = get_top_symbols(top_n)
-    if not symbols:
-        print("      ERROR: could not fetch symbol list from Bitunix API.")
-        return []
-
-    alts = [s for s in symbols if s != config.BTC_SYMBOL]
-    print(f"      Got {len(alts)} alts (BTC excluded from signals)\n")
+    # ── Step 2: symbol list already provided ──────────────────────────────────
+    print(f"\n[2/3] {len(alts)} symbols ready\n")
 
     # ── Step 3: scan each alt ──────────────────────────────────────────────────
-    print(f"[3/3] Scanning {len(alts)} symbols …\n")
+    print(f"[3/3] Scanning …\n")
     active: list[dict] = []
     blocked: list[str] = []
 
     for i, symbol in enumerate(alts, 1):
-        print(f"  [{i:2d}/{len(alts)}] {symbol:<15}", end="  ", flush=True)
-        result = _scan_symbol(symbol, btc_direction, df_btc)
+        print(f"  [{i:3d}/{len(alts)}] {symbol:<16}", end="  ", flush=True)
+        result = _scan_symbol(symbol, btc_direction)
 
         if result["signal"] == "active":
             active.append(result)
@@ -111,43 +108,36 @@ def scan(top_n: int) -> list[dict]:
             blocked.append(symbol)
             print(f"blocked  ({result.get('reason', '?')})")
 
+        # Rate limit pause between symbols (not after the last one)
         if i < len(alts):
             time.sleep(_RATE_DELAY)
 
     # ── Summary ────────────────────────────────────────────────────────────────
-    _print_summary(active, blocked, top_n, btc_direction)
+    _print_summary(active, blocked, btc_direction)
     _write_signals(active)
     return active
 
 
-def _scan_symbol(
-    symbol: str,
-    btc_direction: Direction,
-    df_btc: "pd.DataFrame",
-) -> dict:
-    """Run gates 0-4 on live data for one symbol. Returns signal dict."""
-    import pandas as pd
+def _scan_symbol(symbol: str, btc_direction: Direction) -> dict:
+    """Fetch live data and run gates 2-4 for one symbol."""
 
     def _block(reason: str) -> dict:
         return {"symbol": symbol, "signal": None, "reason": reason}
 
-    # Fetch live 4H
     df_4h = fetch_ohlcv(symbol, config.HTF, limit=_CANDLES["4h"])
     time.sleep(_RATE_DELAY)
     if df_4h is None or df_4h.empty:
         return _block("4H data unavailable")
 
-    # Fetch live 1H
     df_1h = fetch_ohlcv(symbol, config.HTF_ALT, limit=_CANDLES["1h"])
     time.sleep(_RATE_DELAY)
 
-    # Fetch live 5m
     df_5m = fetch_ohlcv(symbol, config.LTF, limit=_CANDLES["5m"])
     time.sleep(_RATE_DELAY)
 
     direction: Direction = btc_direction
 
-    # Gate 2: rejection candle on 4H (fallback to 1H)
+    # Gate 2: rejection candle on 4H (fallback 1H)
     zones_4h = find_active_zones(df_4h, direction, config.HTF)
     rejection = find_rejection(df_4h, len(df_4h) - 1, zones_4h)
 
@@ -158,7 +148,7 @@ def _scan_symbol(
     if rejection is None:
         return _block("gate2: no rejection candle")
 
-    # Gate 3: RSI + MACD (advisory — logged, does not block)
+    # Gate 3: RSI + MACD advisory
     ref_df = df_1h if (df_1h is not None and not df_1h.empty) else df_4h
     gate3_ok = gate3_passes(ref_df, direction)
 
@@ -173,7 +163,6 @@ def _scan_symbol(
     # SL / TP
     atr_val = atr_scalar(df_4h, config.ATR_PERIOD)
     sl_price = compute_sl(direction, rejection.shadow_extreme, atr_val)
-
     tp_ref = df_1h if (df_1h is not None and not df_1h.empty) else df_4h
     tp_price = find_tp(direction, refined_entry, sl_price, tp_ref)
 
@@ -205,30 +194,29 @@ def _scan_symbol(
 def _print_summary(
     active: list[dict],
     blocked: list[str],
-    top_n: int,
     btc_direction: Direction,
 ) -> None:
     total = len(active) + len(blocked)
     print(f"\n{'='*60}")
     print(f"SCAN COMPLETE  {_ts()}")
-    print(f"Scanned: {total}  Active signals: {len(active)}  Blocked: {len(blocked)}")
+    print(f"Scanned: {total}  Active: {len(active)}  Blocked: {len(blocked)}")
     print(f"BTC direction: {btc_direction.upper()}")
     if active:
         print(f"\n── ACTIVE SIGNALS ──")
         for s in active:
             g3 = "G3✓" if s.get("gate3") else "G3·"
             print(
-                f"  {s['symbol']:<15} {s['direction'].upper():<5} "
+                f"  {s['symbol']:<16} {s['direction'].upper():<5} "
                 f"grade={s['grade']} {g3}  "
-                f"zone [{s['zone_type']} {s['zone_tf']}] "
+                f"zone [{s['zone_type']} {s['zone_tf']}]  "
                 f"{s['zone_low']}–{s['zone_high']}"
             )
             print(
-                f"  {'':15} entry={s['entry']}  stop={s['stop']}  "
+                f"  {'':16} entry={s['entry']}  stop={s['stop']}  "
                 f"target={s['target']}  R:R={s['rr']}"
             )
     else:
-        print("\n  No active signals — all symbols blocked at gate0-4.")
+        print("\n  No active signals.")
     print(f"{'='*60}\n")
 
 
@@ -246,9 +234,41 @@ def _ts() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
+def _parse_volume(s: str) -> float:
+    """Parse '5m' → 5_000_000, '1.5m' → 1_500_000, '500k' → 500_000, '1000000' → 1_000_000."""
+    s = s.strip().lower()
+    if s.endswith("m"):
+        return float(s[:-1]) * 1_000_000
+    if s.endswith("k"):
+        return float(s[:-1]) * 1_000
+    return float(s)
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Bitunix ICT live scanner")
-    parser.add_argument("--top", type=int, default=config.TOP_N,
-                        help=f"Number of top symbols to scan (default: {config.TOP_N})")
+    group = parser.add_mutually_exclusive_group()
+    group.add_argument(
+        "--top", type=int, metavar="N",
+        help=f"Scan only top N symbols by 24h volume (default: all >= MIN_VOLUME_USD)",
+    )
+    group.add_argument(
+        "--min-vol", type=str, metavar="USD", default=None,
+        help=f"Min 24h USDT turnover, e.g. 5m or 500k (default: {config.MIN_VOLUME_USD:,.0f})",
+    )
     args = parser.parse_args()
-    scan(top_n=args.top)
+
+    print("Fetching symbol list from Bitunix …")
+    if args.top:
+        symbols = get_top_symbols(args.top)
+        print(f"Mode: top {args.top} symbols")
+    else:
+        min_vol = _parse_volume(args.min_vol) if args.min_vol else config.MIN_VOLUME_USD
+        symbols = get_all_symbols(min_vol)
+        print(f"Mode: ALL symbols >= ${min_vol:,.0f} 24h USDT volume")
+
+    if not symbols:
+        print("ERROR: could not fetch symbol list. Check network and retry.")
+        sys.exit(1)
+
+    print(f"Loaded {len(symbols) - 1} alts + BTC\n")
+    scan(symbols)
