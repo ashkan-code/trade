@@ -126,7 +126,7 @@ def _process(
         zone = rejection.zone
         ref_df = df_1h if df_1h is not None else df_4h
         atr_val = atr_scalar(df_4h, config.ATR_PERIOD)
-        sl_price = compute_sl(direction, zone, atr_val)
+        sl_price = compute_sl(direction, rejection.shadow_extreme, atr_val)
         tp_price = find_tp(direction, rejection.entry, sl_price, ref_df)
         if tp_price is not None:
             rr = compute_rr(rejection.entry, sl_price, tp_price)

@@ -136,7 +136,7 @@ def build_live(
     # SL / TP
     ref_for_tp = df_1h if df_1h is not None else df_4h
     atr_val = atr_scalar(df_4h, config.ATR_PERIOD)
-    sl_price = compute_sl(direction, zone, atr_val)
+    sl_price = compute_sl(direction, rejection.shadow_extreme, atr_val)
     tp_price = find_tp(direction, refined_entry, sl_price, ref_for_tp)
     if tp_price is None:
         return _blocked(symbol, direction, "no_tp: no liquidity target at MIN_RR")

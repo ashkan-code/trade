@@ -119,6 +119,8 @@ def test_find_rejection_finds_valid():
     rejection = find_rejection(df, len(df) - 1, [zone])
     assert rejection is not None
     assert rejection.candle_index == len(df) - 1
+    # shadow_extreme must be the candle low for long
+    assert rejection.shadow_extreme == float(df.iloc[-1]["low"])
 
 
 def test_find_rejection_single_touch_rule():

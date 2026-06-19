@@ -181,8 +181,7 @@ def replay(
 
             # Compute SL/TP on 4H ATR
             atr_val = atr_scalar(df_4h_view, config.ATR_PERIOD)
-            entry_zone = rejection.zone
-            sl_price = compute_sl(current_direction, entry_zone, atr_val)
+            sl_price = compute_sl(current_direction, rejection.shadow_extreme, atr_val)
             tp_price = find_tp(current_direction, rejection.entry, sl_price, df_4h_view)
             if tp_price is None:
                 continue

@@ -133,17 +133,24 @@ def find_rejection(
 
         grade = grade_or_reason  # "A+" or "B"
 
-        # Compute entry: zone edge
+        # Enforce MIN_SETUP_GRADE: if config requires A+, skip Grade B
+        if config.MIN_SETUP_GRADE == "A+" and grade != "A+":
+            continue
+
+        # Entry: zone edge; shadow_extreme: worst point of the rejection wick
         if zone.direction == "long":
             entry = zone.zone_high
+            shadow_extreme = float(row["low"])
         else:
             entry = zone.zone_low
+            shadow_extreme = float(row["high"])
 
         rejection = RejectionCandle(
             candle_index=candidate_idx,
             grade=grade,  # type: ignore[arg-type]
             zone=zone,
             entry=entry,
+            shadow_extreme=shadow_extreme,
         )
 
         # Prefer A+ over B; within same grade, prefer most recent zone

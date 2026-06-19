@@ -30,6 +30,7 @@ class RejectionCandle:
     grade: Literal["A+", "B"]
     zone: Zone
     entry: float
+    shadow_extreme: float   # candle low (long) or high (short) — SL anchor
 
 
 @dataclass(frozen=True)

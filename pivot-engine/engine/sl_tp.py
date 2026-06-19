@@ -11,14 +11,17 @@ from contracts import Direction, Zone
 from engine.ict import atr_scalar, find_liquidity
 
 
-def compute_sl(direction: Direction, zone: Zone, atr_val: float) -> float:
-    """Stop loss: beyond zone edge + SL_BUFFER % of zone height."""
-    zone_height = zone.zone_high - zone.zone_low
-    buffer = max(zone_height * (config.SL_BUFFER / 100), atr_val * 0.1)
+def compute_sl(direction: Direction, shadow_extreme: float, atr_val: float) -> float:
+    """Stop loss: beyond the rejection candle's shadow extreme.
+
+    shadow_extreme: candle low for long, candle high for short.
+    Buffer = max(SL_BUFFER% of shadow price, 0.25 × ATR) — never zero.
+    """
+    buffer = max(shadow_extreme * (config.SL_BUFFER / 100), atr_val * 0.25)
     if direction == "long":
-        return zone.zone_low - buffer
+        return shadow_extreme - buffer
     else:
-        return zone.zone_high + buffer
+        return shadow_extreme + buffer
 
 
 def find_tp(
