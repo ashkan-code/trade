@@ -1,7 +1,12 @@
-"""Pivot Engine entry point.
+"""Pivot Engine entry point — multi-timeframe ICT rejection pipeline.
 
-Reads scanner_output.json → per-symbol: fetch → validate → backtest → live setup →
-gates → report. Writes signals to logs/signals.json.
+For each symbol in scanner_output.json:
+  1. Load BTC 4H + alt 4H / 1H / 5m from CSV (OFFLINE=True) or live API.
+  2. Detect BTC direction via MSS.
+  3. Run 4-gate funnel: MSS → rejection candle → RSI/MACD → 5m entry.
+  4. Backtest on 4H bars; compute honest metrics.
+  5. Gate: metrics flag must be valid AND R:R >= MIN_RR.
+  6. Write signals to logs/signals.json.
 """
 
 import json
@@ -10,23 +15,22 @@ import os
 import sys
 from datetime import datetime, timezone
 
-# Allow running as `python main.py` from pivot-engine/ dir
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
 from backtest.metrics import compute
 from backtest.repaint_audit import audit_no_lookahead
 from backtest.simulator import replay
-from contracts import Direction
+from contracts import Direction, Setup
 from data.loader import get_ohlcv
-from data.validator import check_1
-from engine.pivots import adaptive_lookback, find_pivots
-from engine.structure import find_setup
+from engine.ict import detect_mss, atr_scalar
+from engine.zones import find_active_zones, find_rejection
+from engine.indicators import gate3_passes
+from engine.entry import optimize_entry
+from engine.sl_tp import compute_sl, find_tp, compute_rr
 from report.generator import generate
-from signal.builder import build
+from sigbuild.builder import build
 
-# OFFLINE=True  → read from data/historical/*.csv (after running download_history.py)
-# OFFLINE=False → live fetch from Bitunix API (requires network)
 OFFLINE: bool = True
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
@@ -48,13 +52,24 @@ def main() -> None:
         print("No scanner items found — check scanner_output.json")
         return
 
+    # Load BTC once (shared across all symbols)
+    df_btc_4h = get_ohlcv(config.BTC_SYMBOL, config.HTF, offline=OFFLINE)
+    if df_btc_4h is None:
+        print(f"[WARN] BTC 4H data unavailable — BTC direction gate disabled")
+
+    btc_direction = detect_mss(df_btc_4h) if df_btc_4h is not None else None
+    if btc_direction:
+        print(f"BTC direction: {btc_direction.upper()}")
+    else:
+        print("BTC direction: undetermined (no MSS detected)")
+
     all_signals: list[dict] = []
     for item in scanner_items:
         symbol: str = item["symbol"]
         direction: Direction = item["direction"]
-        print(f"\n{'─'*60}")
+        print(f"\n{'─' * 60}")
         print(f"Processing {symbol} [{direction}]")
-        result = _process(symbol, direction)
+        result = _process(symbol, direction, df_btc_4h, btc_direction)
         all_signals.append(result)
         print(result["report"])
 
@@ -62,37 +77,84 @@ def main() -> None:
     print(f"\nSignals written to {_SIGNALS_FILE}")
 
 
-def _process(symbol: str, direction: Direction) -> dict:
-    # 1. Load (offline CSV or live fetch)
-    df = get_ohlcv(symbol, config.EXECUTION_TF, offline=OFFLINE)
-    if df is None:
-        hint = (f"run: python scripts/download_history.py"
-                if OFFLINE else "check network and Bitunix API")
-        return _error_result(symbol, direction, f"data load failed — {hint}")
+def _process(
+    symbol: str,
+    direction: Direction,
+    df_btc_4h,
+    btc_direction: Direction | None,
+) -> dict:
+    # 1. Load alt data
+    df_4h = get_ohlcv(symbol, config.HTF, offline=OFFLINE)
+    df_1h = get_ohlcv(symbol, config.HTF_ALT, offline=OFFLINE)
+    df_5m = get_ohlcv(symbol, config.LTF, offline=OFFLINE)
 
-    # 2. Validate
-    ok, reason = check_1(df)
-    if not ok:
-        return _error_result(symbol, direction, f"check_1 failed: {reason}")
+    if df_4h is None:
+        return _error_result(symbol, direction, "4H data load failed")
+    if df_1h is None:
+        print(f"  [WARN] 1H data missing for {symbol} — using 4H only")
 
-    # 3. Repaint audit
-    audit_passed, audit_detail = audit_no_lookahead(df)
+    # 2. Gate 0: BTC direction
+    if btc_direction is not None and btc_direction != direction:
+        reason = f"gate0: BTC MSS={btc_direction}, scanner direction={direction}"
+        return _error_result(symbol, direction, reason)
+
+    # 3. Repaint audit (on 4H data)
+    audit_passed, audit_detail = audit_no_lookahead(df_4h)
 
     # 4. Backtest
-    results = replay(df, direction)
+    results = replay(
+        df_4h=df_4h,
+        df_1h=df_1h,
+        df_5m=df_5m,
+        direction=direction,
+        df_btc_4h=None,  # direction already fixed for this symbol
+    )
     metrics = compute(results)
 
-    # 5. Live setup (as_of = last candle)
-    as_of = len(df) - 1
-    lb = adaptive_lookback(df, as_of)
-    pivots = find_pivots(df, as_of=as_of, lookback=lb)
-    live_setup = find_setup(df, as_of=as_of, pivots=pivots, direction=direction)
+    # 5. Live setup at last bar
+    as_of = len(df_4h) - 1
+    zones_4h = find_active_zones(df_4h, direction, config.HTF)
+    rejection = find_rejection(df_4h, as_of, zones_4h)
 
-    # 6. Gate check + signal
+    if rejection is None and df_1h is not None:
+        zones_1h = find_active_zones(df_1h, direction, config.HTF_ALT)
+        last_1h_idx = len(df_1h) - 1
+        rejection = find_rejection(df_1h, last_1h_idx, zones_1h)
+
+    live_setup: Setup | None = None
+    if rejection is not None:
+        zone = rejection.zone
+        ref_df = df_1h if df_1h is not None else df_4h
+        atr_val = atr_scalar(df_4h, config.ATR_PERIOD)
+        sl_price = compute_sl(direction, zone, atr_val)
+        tp_price = find_tp(direction, rejection.entry, sl_price, ref_df)
+        if tp_price is not None:
+            rr = compute_rr(rejection.entry, sl_price, tp_price)
+            if rr >= config.MIN_RR:
+                # Gate 4: 5m entry
+                if df_5m is not None:
+                    entry = optimize_entry(df_5m, zone, direction, df_4h.index[-1])
+                else:
+                    entry = rejection.entry
+                live_setup = Setup(
+                    entry_low=zone.zone_low,
+                    entry_high=zone.zone_high,
+                    target=tp_price,
+                    stop=sl_price,
+                    rr=rr,
+                    direction=direction,
+                    zone=zone,
+                    grade=rejection.grade,
+                )
+
+    # 6. Signal
     signal = build(symbol, direction, live_setup, metrics, audit_passed)
 
     # 7. Report
-    report = generate(symbol, direction, live_setup, metrics, (audit_passed, audit_detail), signal)
+    report = generate(
+        symbol, direction, live_setup, metrics,
+        (audit_passed, audit_detail), signal,
+    )
 
     return {
         "symbol": symbol,
@@ -114,9 +176,15 @@ def _load_scanner() -> list[dict]:
 
 def _write_signals(all_signals: list[dict]) -> None:
     exportable = [
-        {"symbol": s["symbol"], "direction": s["direction"], "signal": s["signal"], "timestamp": s["timestamp"]}
+        {
+            "symbol": s["symbol"],
+            "direction": s["direction"],
+            "signal": s["signal"],
+            "timestamp": s["timestamp"],
+        }
         for s in all_signals
     ]
+    os.makedirs(os.path.dirname(_SIGNALS_FILE), exist_ok=True)
     try:
         with open(_SIGNALS_FILE, "w") as f:
             json.dump(exportable, f, indent=2)
@@ -124,8 +192,10 @@ def _write_signals(all_signals: list[dict]) -> None:
         _log.error("%s failed to write signals.json: %s", _ts(), exc)
 
 
-def _error_result(symbol: str, direction: str, reason: str) -> dict:
+def _error_result(symbol: str, direction: Direction, reason: str) -> dict:
     _log.error("%s %s [%s]: %s", _ts(), symbol, direction, reason)
+    from backtest.metrics import compute
+    empty_metrics = compute([])
     return {
         "symbol": symbol,
         "direction": direction,

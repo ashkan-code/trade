@@ -1,7 +1,6 @@
-"""Honest report generator. Format matches Section 6 of the build spec."""
+"""Honest report generator."""
 
-import sys
-import os
+import sys, os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 from contracts import Metrics, Setup
@@ -21,19 +20,23 @@ def generate(
     lines: list[str] = ["=" * 60]
 
     if setup is not None:
+        grade_str = f"  [Grade {setup.grade}]" if hasattr(setup, "grade") else ""
+        zone_info = ""
+        if setup.zone is not None:
+            zone_info = f"  ({setup.zone.zone_type.upper()} {setup.zone.timeframe})"
         lines += [
             f"SYMBOL    : {symbol}",
             f"DIRECTION : {direction.upper()}",
-            f"ENTRY ZONE: {setup.entry_low:.4f} – {setup.entry_high:.4f}  (net of costs)",
-            f"STOP      : {setup.stop:.4f}   TARGET(102): {setup.target:.4f}",
+            f"ZONE      : {setup.entry_low:.4f} – {setup.entry_high:.4f}{zone_info}{grade_str}",
+            f"STOP      : {setup.stop:.4f}   TARGET: {setup.target:.4f}",
             f"R:R       : {setup.rr:.2f}",
         ]
     else:
         lines += [
             f"SYMBOL    : {symbol}",
             f"DIRECTION : {direction.upper()}",
-            "ENTRY ZONE: — (no valid setup found)",
-            "STOP      : —   TARGET(102): —",
+            "ZONE      : — (no rejection setup found)",
+            "STOP      : —   TARGET: —",
             "R:R       : —",
         ]
 
@@ -53,7 +56,7 @@ def generate(
     if signal and signal.get("signal") is None:
         lines.append(f"\n⛔ SIGNAL BLOCKED: {signal.get('blocked_reason', 'unknown')}")
     elif signal and signal.get("signal") == "active":
-        lines.append("\n✅ SIGNAL: ACTIVE — all 6 gates passed")
+        lines.append(f"\n✅ SIGNAL: ACTIVE — all gates passed (Grade {signal.get('grade', 'B')})")
 
     lines += [
         "",
@@ -85,7 +88,7 @@ def _reliability_text(m: Metrics) -> str:
 
 def _biggest_assumption() -> str:
     return (
-        "Biggest assumption: sweep+reclaim behaviour (101 zone) remains mean-reverting "
-        "in future regimes. If market structure shifts to trend-following with no reclaims, "
-        "win rate collapses and SL hits dominate."
+        "Biggest assumption: OB/FVG rejection (shadow-in, close-out) remains mean-reverting. "
+        "If price begins closing through zones with trend, WR will collapse. "
+        "Re-evaluate if CI lower bound drops below 50% for 3 consecutive weeks."
     )

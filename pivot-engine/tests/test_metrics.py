@@ -23,9 +23,10 @@ def test_empty_results():
 
 
 def test_unreliable_below_min_trades():
-    m = compute(_results(30, 30))
+    # MIN_TRADES=30; use 10 trades (clearly below threshold)
+    m = compute(_results(5, 5))
     assert m.flag == "unreliable"
-    assert m.trades == 60
+    assert m.trades == 10
 
 
 def test_costs_reflected_in_r():
