@@ -215,9 +215,9 @@ def get_top_symbols(n: int | None = None) -> list[str]:
     top = [t["symbol"] for t in usdt[:n] if "symbol" in t]
 
     # BTC always leads — it's the direction filter, not an alt signal
-    if "BTCUSDT" in top:
-        top.remove("BTCUSDT")
-    top.insert(0, "BTCUSDT")
+    if config.BTC_SYMBOL in top:
+        top.remove(config.BTC_SYMBOL)
+    top.insert(0, config.BTC_SYMBOL)
 
     return top
 

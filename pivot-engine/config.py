@@ -50,7 +50,7 @@ FOLDS: int = 5
 WARMUP: int = 50
 
 # Scanner
-TOP_N: int = 50   # top symbols by 24h USDT turnover to scan and backtest
+TOP_N: int = 20   # top symbols by 24h USDT turnover to scan and backtest
 
 # Network
 RETRY_ATTEMPTS: int = 3
