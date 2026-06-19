@@ -1,12 +1,16 @@
 """Pivot Engine entry point — multi-timeframe ICT rejection pipeline.
 
-For each symbol in scanner_output.json:
-  1. Load BTC 4H + alt 4H / 1H / 5m from CSV (OFFLINE=True) or live API.
+Two modes:
+  OFFLINE=True  (default): load CSVs + full backtest + metrics validation.
+  OFFLINE=False           : live scan — fetches symbols + OHLCV from Bitunix API,
+                            runs gates 0-4, prints signals. Same as `python live.py`.
+
+For each symbol:
+  1. Load BTC 4H (direction filter — never traded).
   2. Detect BTC direction via MSS.
   3. Run 4-gate funnel: MSS → rejection candle → RSI/MACD → 5m entry.
-  4. Backtest on 4H bars; compute honest metrics.
-  5. Gate: metrics flag must be valid AND R:R >= MIN_RR.
-  6. Write signals to logs/signals.json.
+  4. (Offline only) Backtest on 4H bars; compute honest metrics.
+  5. Write signals to logs/signals.json or logs/live_signals.json.
 """
 
 import json
@@ -31,7 +35,7 @@ from engine.sl_tp import compute_sl, find_tp, compute_rr
 from report.generator import generate
 from sigbuild.builder import build
 
-OFFLINE: bool = True
+OFFLINE: bool = True   # False = live scan from Bitunix API (same as python live.py)
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
 _SCANNER_FILE = os.path.join(_BASE, "scanner_output.json")
@@ -48,6 +52,12 @@ _log = logging.getLogger(__name__)
 
 
 def main() -> None:
+    if not OFFLINE:
+        # Live scan: delegates to live.py — same logic, no code duplication
+        from live import scan
+        scan(top_n=config.TOP_N)
+        return
+
     # Load BTC first — direction needed to build scanner items from top_symbols.json
     df_btc_4h = get_ohlcv(config.BTC_SYMBOL, config.HTF, offline=OFFLINE)
     if df_btc_4h is None:
