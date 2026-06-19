@@ -18,12 +18,16 @@ from backtest.metrics import compute
 from backtest.repaint_audit import audit_no_lookahead
 from backtest.simulator import replay
 from contracts import Direction
-from data.fetcher import fetch_ohlcv
+from data.loader import get_ohlcv
 from data.validator import check_1
 from engine.pivots import adaptive_lookback, find_pivots
 from engine.structure import find_setup
 from report.generator import generate
 from signal.builder import build
+
+# OFFLINE=True  → read from data/historical/*.csv (after running download_history.py)
+# OFFLINE=False → live fetch from Bitunix API (requires network)
+OFFLINE: bool = True
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
 _SCANNER_FILE = os.path.join(_BASE, "scanner_output.json")
@@ -59,10 +63,12 @@ def main() -> None:
 
 
 def _process(symbol: str, direction: Direction) -> dict:
-    # 1. Fetch
-    df = fetch_ohlcv(symbol, config.EXECUTION_TF, limit=600)
+    # 1. Load (offline CSV or live fetch)
+    df = get_ohlcv(symbol, config.EXECUTION_TF, offline=OFFLINE)
     if df is None:
-        return _error_result(symbol, direction, "fetch failed")
+        hint = (f"run: python scripts/download_history.py"
+                if OFFLINE else "check network and Bitunix API")
+        return _error_result(symbol, direction, f"data load failed — {hint}")
 
     # 2. Validate
     ok, reason = check_1(df)
