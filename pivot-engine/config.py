@@ -51,7 +51,7 @@ WARMUP: int = 50
 
 # Scanner
 TOP_N: int = 20             # top symbols by 24h USDT turnover (used when --top N specified)
-MIN_VOLUME_USD: float = 400_000.0     # minimum 24h USDT turnover to include a symbol
+MIN_VOLUME_USD: float = 0.0           # 0 = no volume filter — scan ALL USDT-M symbols
 MAX_CONCURRENT: int = 10    # parallel symbol workers in live scan
 
 # Network
