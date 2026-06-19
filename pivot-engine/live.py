@@ -20,7 +20,9 @@ import argparse
 import logging
 import os
 import sys
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -51,7 +53,9 @@ _CANDLES: dict[str, int] = {
     "5m": 288,   # ~1 day — entry refinement only
 }
 
-_RATE_DELAY = 0.25  # seconds between API requests
+_RATE_DELAY = 0.25  # seconds between API requests within one symbol's fetch sequence
+
+_print_lock = threading.Lock()
 
 
 def scan(symbols: list[str]) -> list[dict]:
@@ -64,7 +68,8 @@ def scan(symbols: list[str]) -> list[dict]:
     print(f"\n{'='*60}")
     print(f"LIVE SCANNER  {_ts()}")
     print(f"Symbols: {len(alts)} alts  MIN_RR={config.MIN_RR}  "
-          f"HTF={config.HTF}  HTF_ALT={config.HTF_ALT}")
+          f"HTF={config.HTF}  HTF_ALT={config.HTF_ALT}  "
+          f"workers={config.MAX_CONCURRENT}")
     print(f"{'='*60}\n")
 
     # ── Step 1: BTC direction ──────────────────────────────────────────────────
@@ -84,36 +89,45 @@ def scan(symbols: list[str]) -> list[dict]:
     # ── Step 2: symbol list already provided ──────────────────────────────────
     print(f"\n[2/3] {len(alts)} symbols ready\n")
 
-    # ── Step 3: scan each alt ──────────────────────────────────────────────────
-    print(f"[3/3] Scanning …\n")
+    # ── Step 3: parallel scan ─────────────────────────────────────────────────
+    print(f"[3/3] Scanning …  (. = no signal, S = signal)\n")
     active: list[dict] = []
-    blocked: list[str] = []
+    blocked_count = 0
+    completed = 0
+    total = len(alts)
 
-    for i, symbol in enumerate(alts, 1):
-        print(f"  [{i:3d}/{len(alts)}] {symbol:<16}", end="  ", flush=True)
-        result = _scan_symbol(symbol, btc_direction)
+    with ThreadPoolExecutor(max_workers=config.MAX_CONCURRENT) as pool:
+        futures = {pool.submit(_scan_symbol, sym, btc_direction): sym for sym in alts}
 
-        if result["signal"] == "active":
-            active.append(result)
-            g3 = "✓G3" if result.get("gate3") else "·G3"
-            print(
-                f"SIGNAL  {btc_direction.upper():<5}  "
-                f"grade={result['grade']}  {g3}  "
-                f"entry={result['entry']:.4f}  "
-                f"stop={result['stop']:.4f}  "
-                f"target={result['target']:.4f}  "
-                f"R:R={result['rr']:.2f}"
-            )
-        else:
-            blocked.append(symbol)
-            print(f"blocked  ({result.get('reason', '?')})")
+        for fut in as_completed(futures):
+            symbol = futures[fut]
+            completed += 1
+            try:
+                result = fut.result()
+            except Exception as exc:
+                _log.error("%s unhandled error scanning %s: %s", _ts(), symbol, exc)
+                result = {"symbol": symbol, "signal": None, "reason": f"exception: {exc}"}
 
-        # Rate limit pause between symbols (not after the last one)
-        if i < len(alts):
-            time.sleep(_RATE_DELAY)
+            if result.get("signal") == "active":
+                active.append(result)
+                with _print_lock:
+                    g3 = "G3✓" if result.get("gate3") else "G3·"
+                    print(
+                        f"  SIGNAL  {symbol:<16} {btc_direction.upper():<5}  "
+                        f"grade={result['grade']}  {g3}  "
+                        f"entry={result['entry']:.4f}  "
+                        f"stop={result['stop']:.4f}  "
+                        f"target={result['target']:.4f}  "
+                        f"R:R={result['rr']:.2f}  "
+                        f"[{completed}/{total}]"
+                    )
+            else:
+                blocked_count += 1
+                with _print_lock:
+                    print(f"  .  [{completed:>4}/{total}]  {symbol}", flush=True)
 
     # ── Summary ────────────────────────────────────────────────────────────────
-    _print_summary(active, blocked, btc_direction)
+    _print_summary(active, blocked_count, btc_direction, total)
     _write_signals(active)
     return active
 
@@ -193,27 +207,27 @@ def _scan_symbol(symbol: str, btc_direction: Direction) -> dict:
 
 def _print_summary(
     active: list[dict],
-    blocked: list[str],
+    blocked_count: int,
     btc_direction: Direction,
+    total: int,
 ) -> None:
-    total = len(active) + len(blocked)
     print(f"\n{'='*60}")
     print(f"SCAN COMPLETE  {_ts()}")
-    print(f"Scanned: {total}  Active: {len(active)}  Blocked: {len(blocked)}")
+    print(f"Scanned: {total}  Active: {len(active)}  Blocked: {blocked_count}")
     print(f"BTC direction: {btc_direction.upper()}")
+
     if active:
-        print(f"\n── ACTIVE SIGNALS ──")
+        print(f"\n── ACTIVE SIGNALS ──────────────────────────────────────")
+        header = f"  {'SYMBOL':<16} {'DIR':<5} {'GRADE':<6} {'G3':<4} {'ZONE':<18} {'ENTRY':>10} {'STOP':>10} {'TARGET':>10} {'R:R':>5}"
+        print(header)
+        print(f"  {'-'*len(header.strip())}")
         for s in active:
-            g3 = "G3✓" if s.get("gate3") else "G3·"
+            g3 = "✓" if s.get("gate3") else "·"
+            zone_str = f"{s['zone_type']} {s['zone_tf']}"
             print(
                 f"  {s['symbol']:<16} {s['direction'].upper():<5} "
-                f"grade={s['grade']} {g3}  "
-                f"zone [{s['zone_type']} {s['zone_tf']}]  "
-                f"{s['zone_low']}–{s['zone_high']}"
-            )
-            print(
-                f"  {'':16} entry={s['entry']}  stop={s['stop']}  "
-                f"target={s['target']}  R:R={s['rr']}"
+                f"{s['grade']:<6} {g3:<4} {zone_str:<18} "
+                f"{s['entry']:>10.4f} {s['stop']:>10.4f} {s['target']:>10.4f} {s['rr']:>5.2f}"
             )
     else:
         print("\n  No active signals.")

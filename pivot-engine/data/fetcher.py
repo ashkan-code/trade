@@ -1,6 +1,7 @@
 """Bitunix REST kline fetcher with retry logic and pagination (max 200 candles/request)."""
 
 import logging
+import threading
 import time
 from datetime import datetime, timezone
 
@@ -37,6 +38,9 @@ _TF_MAP: dict[str, str] = {
 
 # Bitunix caps at 200 candles per request — set by user
 _BATCH_SIZE: int = 200
+
+# Global HTTP concurrency cap — keeps total in-flight requests under Bitunix's 10 req/s limit
+_HTTP_SEM = threading.Semaphore(8)
 
 # Confirmed via live test: time field is 13-digit milliseconds (e.g. 1781492400000)
 _TIME_UNIT: str = "ms"
@@ -114,7 +118,8 @@ def _fetch_one(params: dict, symbol: str) -> pd.DataFrame | None:
         if delay:
             time.sleep(delay)
         try:
-            resp = requests.get(KLINE_URL, params=params, timeout=15)
+            with _HTTP_SEM:
+                resp = requests.get(KLINE_URL, params=params, timeout=15)
             resp.raise_for_status()
             data = resp.json()
             if data.get("code", -1) != 0:
@@ -176,7 +181,8 @@ def _fetch_tickers() -> list[dict]:
     """Fetch all USDT-M tickers from Bitunix. Returns [] on failure."""
     _setup_error_log()
     try:
-        resp = requests.get(TICKERS_URL, timeout=15)
+        with _HTTP_SEM:
+            resp = requests.get(TICKERS_URL, timeout=15)
         resp.raise_for_status()
         data = resp.json()
         if data.get("code", -1) != 0:
