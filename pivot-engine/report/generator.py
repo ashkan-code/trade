@@ -64,7 +64,7 @@ def generate(
         "-" * 40,
         _reliability_text(metrics),
         _biggest_assumption(),
-        f"repaint-audit: {'PASS' if audit_passed else 'FAIL'} — {audit_detail}",
+        f"repaint-audit: {audit_detail}",
         "=" * 60,
     ]
 
