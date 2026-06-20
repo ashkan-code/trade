@@ -53,6 +53,8 @@ WARMUP: int = 50
 TOP_N: int = 20             # top symbols by 24h USDT turnover (used when --top N specified)
 MIN_VOLUME_USD: float = 0.0           # 0 = no volume filter — scan ALL USDT-M symbols
 MAX_CONCURRENT: int = 10    # parallel symbol workers in live scan
+SIMILARITY_MIN: float = 0.7           # Pearson correlation threshold vs BTC pivot vector
+SIMILARITY_PIVOTS: int = 6            # number of consecutive pivot-to-pivot % changes to compare
 
 # Network
 RETRY_ATTEMPTS: int = 3
