@@ -20,6 +20,7 @@ import config
 from data.fetcher import fetch_ohlcv
 from data.validator import check_1
 from backtest.replay_core import replay_with_trace
+from backtest.replay_pivot import replay_pivot_with_trace
 from backtest.metrics import compute
 
 SYMBOL = "BTCUSDT"
@@ -128,6 +129,53 @@ def main() -> None:
     if m.trades < config.MIN_TRADES:
         print(f"\n⚠ Only {m.trades} trades on {len(df_4h)} 4h bars.")
         print("  Increase fetch limit or run on more symbols to reach MIN_TRADES.")
+
+    # Step 5: predict_101_102 multi-TF backtest (the missing heart)
+    print(f"\n{'=' * 50}")
+    print(f"STEP 5 — predict_101_102 multi-TF backtest ({DIRECTION})")
+    print("=" * 50)
+    print("Logic: HH+HL→LONG, LH+LL→SHORT; 101=structural support/resistance;")
+    print("       102=real opposing swing (NO Fibonacci); ≥2 TFs must agree.")
+    p_results, p_traces = replay_pivot_with_trace(df_4h, df_1h, df_1d, DIRECTION, max_trace=5)
+    print(f"Total pivot trades: {len(p_results)}")
+
+    if not p_results:
+        print("\nZero pivot trades — possible reasons:")
+        print("  1. Swing structure ambiguous (no clear HH+HL or LH+LL chain)")
+        print("  2. <2 TFs agreeing on direction at the same time")
+        print("  3. 101 zones on different TFs too far apart (> 1 ATR)")
+        print("  4. R:R < MIN_RR=2.0 (102 too close to 101)")
+        print("  5. No 4h bar wick touching the 101 zone when confluence fires")
+    else:
+        for j, t in enumerate(p_traces):
+            print(f"\nPivot Trade #{j + 1}:")
+            print(f"  Signal     : 4h bar {t['signal_bar_4h']}  {t['signal_ts']}")
+            print(f"  Direction  : {t['direction'].upper()}")
+            print(f"  Conf TFs   : {t['conf_tfs']}")
+            print(f"  101 zone   : {t['p101_zone']}")
+            print(f"  102 target : {t['p102']:.2f}")
+            print(f"  Stop       : {t['stop']:.2f}")
+            print(f"  R:R plan   : {t['rr_planned']:.2f}")
+            print(f"  Entry      : {t['entry_price']:.2f}  (next 4h open + slippage)")
+            if "exit_bar_4h" in t:
+                print(f"  Exit       : bar {t['exit_bar_4h']}  price {t['exit_price']:.2f}  [{t['reason']}]")
+                print(f"  Bars held  : {t['bars_held']} × 4h")
+                print(f"  R gross    : {t['r_gross']:+.4f}")
+                print(f"  Cost       : -{t['cost']:.6f}  (taker + funding)")
+                print(f"  R NET      : {t['r_net']:+.4f}  {'✓ WIN' if t['won'] else '✗ LOSS'}")
+
+        pm = compute(p_results)
+        print("\n" + "=" * 50)
+        print("PIVOT 101/102 RESULT (real data — net of all costs)")
+        print("=" * 50)
+        print(f"Trades     : {pm.trades}  (need ≥{config.MIN_TRADES} for 'valid')")
+        print(f"Win Rate   : {pm.wr:.1%}  [Wilson 95%: {pm.wr_ci_low:.1%} – {pm.wr_ci_high:.1%}]")
+        print(f"Expectancy : {pm.expectancy_r:+.4f} R  ← primary metric")
+        print(f"Walk-fwd   : {pm.folds_positive}/{pm.fold_count} folds positive")
+        print(f"Flag       : {pm.flag.upper()}")
+        if pm.trades < config.MIN_TRADES:
+            print(f"\n⚠ Only {pm.trades} pivot trades on {len(df_4h)} 4h bars.")
+            print("  Fetch more bars or add symbols; confluence requirement keeps trade count low.")
 
 
 if __name__ == "__main__":
