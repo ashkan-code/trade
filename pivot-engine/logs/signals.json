@@ -2,11 +2,23 @@
   {
     "symbol": "BTCUSDT",
     "direction": "long",
-    "flag": "test"
+    "signal": {
+      "symbol": "BTCUSDT",
+      "direction": "long",
+      "signal": null,
+      "blocked_reason": "fetch failed"
+    },
+    "timestamp": "2026-06-20T05:17:41.662321+00:00"
   },
   {
     "symbol": "ETHUSDT",
     "direction": "long",
-    "flag": "test"
+    "signal": {
+      "symbol": "ETHUSDT",
+      "direction": "long",
+      "signal": null,
+      "blocked_reason": "fetch failed"
+    },
+    "timestamp": "2026-06-20T05:17:56.857486+00:00"
   }
 ]
