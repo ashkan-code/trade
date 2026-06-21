@@ -174,6 +174,246 @@ def diagnose_sweep_rejection(df: pd.DataFrame, direction: Direction) -> str:
     return "passed"
 
 
+def _find_recent_4h_sweep(
+    df_4h: pd.DataFrame,
+    direction: Direction,
+) -> "tuple[int, float, Zone, str, float, float] | None":
+    """Find the most recent valid 4H sweep bar in the last SWEEP_LOOKBACK bars.
+    Returns (bar_idx, swept_level, sweep_zone, grade, entry, shadow_extreme) or None.
+    """
+    n = len(df_4h)
+    if n < config.SWEEP_LOOKBACK + config.LOOKBACK_BARS + 5:
+        return None
+
+    for bar_idx in range(n - 1, max(n - 1 - config.SWEEP_LOOKBACK, config.SWEEP_LOOKBACK + config.LOOKBACK_BARS) - 1, -1):
+        lb_start = max(0, bar_idx - config.SWEEP_LOOKBACK)
+        row = df_4h.iloc[bar_idx]
+        h = float(row["high"]); l = float(row["low"])
+        c = float(row["close"]); o = float(row["open"])
+        vol = float(row["volume"])
+
+        # 1 & 2: sweep + reclaim
+        if direction == "short":
+            swing_arr = df_4h["high"].values[lb_start:bar_idx]
+            if not len(swing_arr): continue
+            swing_level = float(swing_arr.max())
+            origin_int = lb_start + int(swing_arr.argmax())
+            if not (h > swing_level and c < swing_level): continue
+        else:
+            swing_arr = df_4h["low"].values[lb_start:bar_idx]
+            if not len(swing_arr): continue
+            swing_level = float(swing_arr.min())
+            origin_int = lb_start + int(swing_arr.argmin())
+            if not (l < swing_level and c > swing_level): continue
+
+        # 3: sweep bar volume
+        vol_sma = _volume_sma(df_4h, bar_idx - 1)
+        if vol_sma > 0 and vol < config.VOLUME_MIN_RATIO * vol_sma:
+            continue
+
+        # 4: counter-momentum in LOOKBACK_BARS before THIS bar
+        cm_start = max(0, bar_idx - config.LOOKBACK_BARS)
+        blocked = False
+        for i in range(cm_start, bar_idx):
+            prev = df_4h.iloc[i]
+            pv = float(prev["volume"])
+            sma_i = _volume_sma(df_4h, i - 1)
+            if sma_i <= 0 or pv < config.VOLUME_SPIKE_MULTIPLIER * sma_i:
+                continue
+            is_bull = float(prev["close"]) > float(prev["open"])
+            if direction == "short" and is_bull:
+                blocked = True; break
+            if direction == "long" and not is_bull:
+                blocked = True; break
+        if blocked:
+            continue
+
+        # Valid sweep — build zone and grade
+        body = abs(c - o)
+        if direction == "short":
+            wick = h - max(o, c)
+            zone = Zone("ob", "short", zone_high=h, zone_low=swing_level,
+                        origin_index=origin_int, timeframe="4h")
+            entry = swing_level; shadow_extreme = h
+        else:
+            wick = min(o, c) - l
+            zone = Zone("ob", "long", zone_high=swing_level, zone_low=l,
+                        origin_index=origin_int, timeframe="4h")
+            entry = swing_level; shadow_extreme = l
+
+        grade: str = "A+" if body > 0 and wick >= body else "B"
+        return bar_idx, swing_level, zone, grade, entry, shadow_extreme
+
+    return None
+
+
+def _find_ltf_ob_after_sweep(
+    df_ltf: pd.DataFrame,
+    sweep_ts: "pd.Timestamp",
+    direction: Direction,
+    timeframe: str,
+) -> "tuple[Zone, str, float, float] | None":
+    """Find a valid OB/FVG on LTF formed after sweep_ts within SWEEP_TO_OB_MAX_BARS×4H.
+    Last bar of df_ltf must be rejecting from it.
+    Returns (zone, grade, entry, shadow_extreme) or None.
+    """
+    if df_ltf is None or df_ltf.empty:
+        return None
+
+    n = len(df_ltf)
+    end_ts = sweep_ts + pd.Timedelta(hours=config.SWEEP_TO_OB_MAX_BARS * 4)
+
+    # Convert timestamps to integer indices
+    sweep_pos = int(df_ltf.index.searchsorted(sweep_ts, side="left"))
+    end_pos = int(min(df_ltf.index.searchsorted(end_ts, side="right"), n))
+
+    if sweep_pos >= n:
+        return None  # sweep is after all available LTF data
+
+    valid_indices = set(range(sweep_pos, end_pos))
+    if not valid_indices:
+        return None
+
+    # Detect on full history (need swing context)
+    obs = detect_order_blocks(df_ltf, direction, timeframe)
+    fvgs = detect_fvg(df_ltf, direction, timeframe)
+
+    # Filter to zones formed inside the valid time window
+    zones = [z for z in (obs + fvgs) if z.origin_index in valid_indices]
+    if not zones:
+        return None
+
+    zones.sort(key=lambda z: z.origin_index, reverse=True)
+
+    last_idx = n - 1
+    last_row = df_ltf.iloc[last_idx]
+    best_zone: Zone | None = None
+    best_grade: str | None = None
+    best_entry: float | None = None
+    best_shadow: float | None = None
+
+    for zone in zones:
+        if _has_prior_touch(df_ltf, zone, last_idx):
+            continue
+        passed, grade_or_reason = validate_rejection(last_row, zone)
+        if not passed:
+            continue
+        grade = grade_or_reason
+        if best_zone is None or (grade == "A+" and best_grade != "A+"):
+            best_zone = zone
+            best_grade = grade
+            if direction == "long":
+                best_entry = zone.zone_high
+                best_shadow = float(last_row["low"])
+            else:
+                best_entry = zone.zone_low
+                best_shadow = float(last_row["high"])
+
+    if best_zone is None:
+        return None
+
+    return best_zone, best_grade, best_entry, best_shadow  # type: ignore[return-value]
+
+
+def find_gate2_signal(
+    df_4h: pd.DataFrame,
+    df_1h: "pd.DataFrame | None",
+    df_30m: "pd.DataFrame | None",
+    df_15m: "pd.DataFrame | None",
+    direction: Direction,
+) -> "Gate2Result | None":
+    """Hierarchical Gate 2: mandatory 4H sweep → LTF OB/FVG confirmation.
+
+    Step 1: Find the most recent valid 4H sweep (last SWEEP_LOOKBACK bars).
+    Step 2: For each of 1H/30m/15m, look for OBs formed after the sweep.
+    Step 3: Last LTF bar must be rejecting from at least one OB.
+    Returns None if 4H sweep missing or no LTF confirms.
+    """
+    from contracts import Gate2Result
+
+    # Step 1: mandatory 4H sweep
+    sweep = _find_recent_4h_sweep(df_4h, direction)
+    if sweep is None:
+        return None
+
+    sweep_bar_idx, swept_level, sweep_zone, sweep_grade, sweep_entry, sweep_shadow = sweep
+    sweep_ts = df_4h.index[sweep_bar_idx]
+
+    # Step 2: LTF OB/FVG after sweep
+    ltf_data = [("1h", df_1h), ("30m", df_30m), ("15m", df_15m)]
+    confirmed: dict[str, tuple] = {}
+
+    for tf, df_ltf in ltf_data:
+        if df_ltf is None or df_ltf.empty:
+            continue
+        result = _find_ltf_ob_after_sweep(df_ltf, sweep_ts, direction, tf)
+        if result is not None:
+            confirmed[tf] = result
+
+    if not confirmed:
+        return None
+
+    # Pick primary (prefer 1H > 30m > 15m)
+    primary_tf = next(tf for tf in ["1h", "30m", "15m"] if tf in confirmed)
+    p_zone, p_grade, p_entry, p_shadow = confirmed[primary_tf]
+
+    return Gate2Result(
+        sweep_bar_idx=sweep_bar_idx,
+        swept_level=swept_level,
+        sweep_zone=sweep_zone,
+        primary_zone=p_zone,
+        primary_tf=primary_tf,
+        entry=p_entry,
+        shadow_extreme=p_shadow,
+        grade=p_grade,
+        ltf_confirmed=list(confirmed.keys()),
+        confluence_stars=min(len(confirmed), 3),
+    )
+
+
+def diagnose_gate2_signal(
+    df_4h: pd.DataFrame,
+    df_1h: "pd.DataFrame | None",
+    df_30m: "pd.DataFrame | None",
+    df_15m: "pd.DataFrame | None",
+    direction: Direction,
+) -> str:
+    """Return primary reason find_gate2_signal returned None."""
+    sweep = _find_recent_4h_sweep(df_4h, direction)
+    if sweep is None:
+        # Sub-diagnose
+        n = len(df_4h)
+        if n < config.SWEEP_LOOKBACK + 10:
+            return "insufficient_data"
+        bar_idx = n - 1
+        lb_start = max(0, bar_idx - config.SWEEP_LOOKBACK)
+        row = df_4h.iloc[bar_idx]
+        h = float(row["high"]); l = float(row["low"])
+        c = float(row["close"]); vol = float(row["volume"])
+        if direction == "short":
+            arr = df_4h["high"].values[lb_start:bar_idx]
+            sl = float(arr.max()) if len(arr) else 0.0
+            swept = h > sl and c < sl
+        else:
+            arr = df_4h["low"].values[lb_start:bar_idx]
+            sl = float(arr.min()) if len(arr) else float("inf")
+            swept = l < sl and c > sl
+        if not swept:
+            return "no_4h_sweep"
+        vsma = _volume_sma(df_4h, bar_idx - 1)
+        if vsma > 0 and vol < config.VOLUME_MIN_RATIO * vsma:
+            return "4h_sweep_low_volume"
+        return "4h_sweep_counter_momentum"
+
+    sweep_ts = df_4h.index[sweep[0]]
+    for tf, df_ltf in [("1h", df_1h), ("30m", df_30m), ("15m", df_15m)]:
+        if df_ltf is None or df_ltf.empty:
+            continue
+        if _find_ltf_ob_after_sweep(df_ltf, sweep_ts, direction, tf) is not None:
+            return "passed"  # shouldn't reach here
+    return "no_ob_after_sweep"
+
+
 def find_active_zones(
     df: pd.DataFrame,
     direction: Direction,

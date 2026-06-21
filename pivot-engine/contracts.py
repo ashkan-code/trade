@@ -33,6 +33,21 @@ class RejectionCandle:
     shadow_extreme: float   # candle low (long) or high (short) — SL anchor
 
 
+@dataclass
+class Gate2Result:
+    """Result of the hierarchical Gate 2 (4H sweep → LTF OB/FVG)."""
+    sweep_bar_idx: int        # index in df_4h of the confirmed sweep bar
+    swept_level: float        # price level swept (buy-side HIGH for SHORT, sell-side LOW for LONG)
+    sweep_zone: "Zone"        # zone built from the 4H sweep
+    primary_zone: "Zone"      # best LTF OB/FVG zone for entry/SL (prefer 1H)
+    primary_tf: str           # "1h", "30m", or "15m"
+    entry: float              # entry price = zone edge of primary_zone
+    shadow_extreme: float     # for SL (last LTF bar's high for SHORT, low for LONG)
+    grade: str                # "A+" or "B" from OB rejection quality
+    ltf_confirmed: list       # list of confirmed TFs e.g. ["1h", "30m"]
+    confluence_stars: int     # 1, 2, or 3
+
+
 @dataclass(frozen=True)
 class MicroEntry:
     entry: float

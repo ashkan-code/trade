@@ -2,16 +2,20 @@
 
 Gates run on live API data (no CSVs):
   Gate 0: BTC 4H MSS direction
-  Gate 2: ICT/Wyckoff sweep+reclaim on ANY of 4H / 1H / 30m / 15m
-          Sweep conditions: liquidity sweep, reclaim close, volume ≥ SMA×ratio,
-          no counter-institutional momentum spike in prior LOOKBACK_BARS
+  Gate 2: Hierarchical sweep chain — mandatory 4H sweep+reclaim, then LTF OB/FVG
+          Step 1: Find most recent valid 4H sweep (last SWEEP_LOOKBACK bars):
+                  liquidity sweep, reclaim close, volume ≥ SMA×ratio,
+                  no counter-momentum spike in prior LOOKBACK_BARS
+          Step 2: For each of 1H/30m/15m find an OB/FVG formed after sweep
+                  with last bar rejecting from it
+          Blocks if 4H sweep missing OR no LTF OB confirms
   Gate 3: RSI + MACD advisory (logged, does not block)
-  Gate 4: micro OB/FVG on 5m within HTF sweep zone — scored and ranked
+  Gate 4: micro OB/FVG on 5m within primary LTF zone — scored and ranked
 
-Multi-TF confluence levels (used for signal ranking):
-  ★★★  4H + 1H sweep zones overlap + (30m or 15m also overlaps, or 5m micro found)
-  ★★   4H + 1H sweep zones overlap in price
-  ★    single-timeframe sweep
+Confluence stars (used for signal ranking):
+  ★★★  all 3 of 1H + 30m + 15m LTF OBs confirmed after sweep
+  ★★   2 LTF TFs confirmed
+  ★    1 LTF TF confirmed
 
 Usage:
     python live.py                # scan all symbols >= MIN_VOLUME_USD
@@ -41,7 +45,7 @@ from engine.entry import find_micro_entry, zones_overlap
 from engine.ict import atr_scalar, detect_mss
 from engine.indicators import gate3_passes
 from engine.sl_tp import compute_rr, compute_sl, find_tp
-from engine.zones import diagnose_sweep_rejection, find_sweep_rejection
+from engine.zones import diagnose_gate2_signal, find_gate2_signal
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
 _SIGNALS_FILE = os.path.join(_BASE, "logs", "live_signals.json")
@@ -166,7 +170,7 @@ def _fetch_all_tfs(symbol: str) -> dict[str, "pd.DataFrame | None"]:
 
 
 def _scan_symbol(symbol: str, btc_direction: Direction) -> dict:
-    """Fetch live data, run gates 2-4, compute multi-TF sweep confluence."""
+    """Fetch live data, run gates 2-4, hierarchical 4H sweep → LTF OB/FVG chain."""
 
     def _block(reason: str) -> dict:
         return {"symbol": symbol, "signal": None, "reason": reason}
@@ -189,63 +193,29 @@ def _scan_symbol(symbol: str, btc_direction: Direction) -> dict:
 
     direction: Direction = btc_direction
 
-    # ── Gate 2: ICT sweep on each TF (passes if ANY TF passes) ─────────────────
-    def _sw(df: "pd.DataFrame | None", tf: str) -> "RejectionCandle | None":
-        if df is None or df.empty:
-            return None
-        return find_sweep_rejection(df, direction, tf)
-
-    sweep_4h  = _sw(df_4h,  config.HTF)
-    sweep_1h  = _sw(df_1h,  config.HTF_ALT)
-    sweep_30m = _sw(df_30m, "30m")
-    sweep_15m = _sw(df_15m, "15m")
-
-    if not any([sweep_4h, sweep_1h, sweep_30m, sweep_15m]):
-        # Diagnostic: best reason across TFs (counter_momentum > volume > sweep)
-        best_reason = "sweep_not_found"
-        for df_tf in [df_4h, df_1h, df_30m, df_15m]:
-            if df_tf is None or df_tf.empty:
-                continue
-            r = diagnose_sweep_rejection(df_tf, direction)
-            if r == "counter_momentum":
-                best_reason = "counter_momentum"
-                break
-            if r == "volume_min_ratio" and best_reason == "sweep_not_found":
-                best_reason = "volume_min_ratio"
+    # ── Gate 2: hierarchical 4H sweep → LTF OB/FVG ─────────────────────────────
+    g2 = find_gate2_signal(df_4h, df_1h, df_30m, df_15m, direction)
+    if g2 is None:
+        reason = diagnose_gate2_signal(df_4h, df_1h, df_30m, df_15m, direction)
         with _print_lock:
-            _gate2_stats[best_reason] = _gate2_stats.get(best_reason, 0) + 1
-        return _block(f"gate2: {best_reason}")
-
-    # Primary sweep: prefer higher timeframe
-    primary: RejectionCandle = (sweep_4h or sweep_1h or sweep_30m or sweep_15m)  # type: ignore[assignment]
+            _gate2_stats[reason] = _gate2_stats.get(reason, 0) + 1
+        return _block(f"gate2: {reason}")
 
     # ── Gate 3: RSI + MACD advisory ────────────────────────────────────────────
     ref_df = df_1h if (df_1h is not None and not df_1h.empty) else df_4h
     gate3_ok = gate3_passes(ref_df, direction)
 
-    # ── Confluence level ────────────────────────────────────────────────────────
-    # ★★:  4H + 1H sweep zones overlap in price
-    # ★★★: 4H + 1H + (30m or 15m) zones overlap
-    confluence_stars = 1
-    if sweep_4h and sweep_1h and zones_overlap(sweep_4h.zone, sweep_1h.zone):
-        confluence_stars = 2
-        ltf_ok = (
-            (sweep_30m and zones_overlap(sweep_4h.zone, sweep_30m.zone)) or
-            (sweep_15m and zones_overlap(sweep_4h.zone, sweep_15m.zone))
-        )
-        if ltf_ok:
-            confluence_stars = 3
+    # ── Confluence ──────────────────────────────────────────────────────────────
+    confluence_stars = g2.confluence_stars
 
-    # ── Gate 4: micro OB/FVG on 5m within primary HTF zone ────────────────────
+    # ── Gate 4: 5m micro OB inside primary LTF zone ────────────────────────────
     micro: MicroEntry | None = None
     if df_5m is not None and not df_5m.empty:
         atr_5m_val = atr_scalar(df_5m, config.ATR_5m_PERIOD)
         micro = find_micro_entry(
-            df_5m, primary.zone, direction, None, atr_5m_val, config.LTF,
+            df_5m, g2.primary_zone, direction, None, atr_5m_val, config.LTF,
             lookback_bars=96,
         )
-        if micro is not None and confluence_stars == 2:
-            confluence_stars = 3
 
     # ── Entry and SL ────────────────────────────────────────────────────────────
     if micro is not None:
@@ -253,8 +223,8 @@ def _scan_symbol(symbol: str, btc_direction: Direction) -> dict:
         sl_price = compute_sl(direction, micro.shadow_extreme, atr_scalar(df_5m, config.ATR_5m_PERIOD))  # type: ignore[arg-type]
         micro_score = micro.score
     else:
-        refined_entry = primary.entry
-        sl_price = compute_sl(direction, primary.shadow_extreme, atr_scalar(df_4h, config.ATR_PERIOD))
+        refined_entry = g2.entry
+        sl_price = compute_sl(direction, g2.shadow_extreme, atr_scalar(df_4h, config.ATR_PERIOD))
         micro_score = 0.0
 
     # ── TP ──────────────────────────────────────────────────────────────────────
@@ -272,15 +242,15 @@ def _scan_symbol(symbol: str, btc_direction: Direction) -> dict:
         "symbol": symbol,
         "direction": direction,
         "signal": "active",
-        "grade": primary.grade,
+        "grade": g2.grade,
         "gate3": gate3_ok,
         "confluence": "★" * confluence_stars,
         "confluence_stars": confluence_stars,
         "micro_score": round(micro_score, 2),
-        "zone_type": primary.zone.zone_type,
-        "zone_tf": primary.zone.timeframe,
-        "zone_low": primary.zone.zone_low,
-        "zone_high": primary.zone.zone_high,
+        "zone_type": g2.primary_zone.zone_type,
+        "zone_tf": f"sweep→{g2.primary_tf}",
+        "zone_low": g2.primary_zone.zone_low,
+        "zone_high": g2.primary_zone.zone_high,
         "entry": refined_entry,
         "stop": sl_price,
         "target": tp_price,
@@ -334,17 +304,19 @@ def _print_summary(
     else:
         print("\n  No active signals.")
 
-    # ── Gate 2 sweep rejection breakdown ───────────────────────────────────────
+    # ── Gate 2 rejection breakdown ─────────────────────────────────────────────
     if _gate2_stats:
-        print(f"\n── GATE 2 SWEEP REJECTION BREAKDOWN ───────────────────────────────")
+        print(f"\n── GATE 2 REJECTION BREAKDOWN ──────────────────────────────────────")
         _reason_labels = {
-            "sweep_not_found":   "No sweep+reclaim on any TF (4H/1H/30m/15m)",
-            "volume_min_ratio":  "Rejection candle volume below SMA threshold",
-            "counter_momentum":  "Counter-institutional momentum spike detected",
-            "insufficient_data": "Insufficient data for sweep detection",
+            "no_4h_sweep":               "No valid 4H sweep+reclaim found",
+            "4h_sweep_low_volume":        "4H sweep candle volume below SMA threshold",
+            "4h_sweep_counter_momentum":  "Counter-momentum before 4H sweep",
+            "no_ob_after_sweep":          "No LTF OB/FVG after sweep (1H/30m/15m)",
+            "insufficient_data":          "Insufficient 4H data",
         }
         total_blocked = sum(_gate2_stats.values())
-        for key in ["sweep_not_found", "volume_min_ratio", "counter_momentum", "insufficient_data"]:
+        for key in ["no_4h_sweep", "4h_sweep_low_volume", "4h_sweep_counter_momentum",
+                    "no_ob_after_sweep", "insufficient_data"]:
             count = _gate2_stats.get(key, 0)
             if count:
                 label = _reason_labels.get(key, key)
