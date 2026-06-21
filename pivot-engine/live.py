@@ -39,7 +39,7 @@ from engine.entry import find_micro_entry, zones_overlap
 from engine.ict import atr_scalar, detect_mss
 from engine.indicators import gate3_passes
 from engine.sl_tp import compute_rr, compute_sl, find_tp
-from engine.zones import find_active_zones, find_rejection
+from engine.zones import diagnose_gate2_rejection, find_active_zones, find_rejection
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
 _SIGNALS_FILE = os.path.join(_BASE, "logs", "live_signals.json")
@@ -62,9 +62,14 @@ _RATE_DELAY = 0.25  # seconds between sequential API requests per symbol
 
 _print_lock = threading.Lock()
 
+# Gate 2 diagnostic counters (protected by _print_lock)
+_gate2_stats: dict[str, int] = {}
+
 
 def scan(symbols: list[str]) -> list[dict]:
     """Scan a pre-built list of symbols. Returns list of active signal dicts."""
+    global _gate2_stats
+    _gate2_stats = {}
     alts = [s for s in symbols if s != config.BTC_SYMBOL]
 
     print(f"\n{'='*60}")
@@ -165,7 +170,17 @@ def _scan_symbol(symbol: str, btc_direction: Direction) -> dict:
         rejection_1h = find_rejection(df_1h, len(df_1h) - 1, zones_1h)
 
     if rejection_4h is None and rejection_1h is None:
-        return _block("gate2: no rejection candle")
+        # Diagnostic: determine the primary reason both TFs have no rejection
+        reason_4h = diagnose_gate2_rejection(df_4h, len(df_4h) - 1, zones_4h)
+        if df_1h is not None and not df_1h.empty:
+            reason_1h = diagnose_gate2_rejection(df_1h, len(df_1h) - 1, zones_1h)
+            # Report the 4H reason as primary (higher-TF signal is the gating factor)
+            gate2_reason = reason_4h
+        else:
+            gate2_reason = reason_4h
+        with _print_lock:
+            _gate2_stats[gate2_reason] = _gate2_stats.get(gate2_reason, 0) + 1
+        return _block(f"gate2: {gate2_reason}")
 
     # Primary rejection: prefer 4H (higher TF weight)
     primary: RejectionCandle = rejection_4h if rejection_4h is not None else rejection_1h  # type: ignore[assignment]
@@ -282,6 +297,26 @@ def _print_summary(
             )
     else:
         print("\n  No active signals.")
+
+    # ── Gate 2 rejection breakdown ──────────────────────────────────────────────
+    if _gate2_stats:
+        print(f"\n── GATE 2 REJECTION BREAKDOWN ──────────────────────────────────────")
+        _reason_labels = {
+            "rejection_shape":  "Rejection shape failed (wick/penetration/close)",
+            "prior_touch":      "Zone already touched (single-touch rule)",
+            "grade_filter":     "Grade filter (MIN_SETUP_GRADE=A+ required)",
+            "zone_too_recent":  "No zone formed before the candle",
+            "no_active_zones":  "No active OB/FVG zones detected",
+        }
+        total_blocked = sum(_gate2_stats.values())
+        for key in ["rejection_shape", "prior_touch", "grade_filter", "zone_too_recent", "no_active_zones"]:
+            count = _gate2_stats.get(key, 0)
+            if count:
+                label = _reason_labels.get(key, key)
+                print(f"  {label}: {count}  ({100*count//total_blocked}%)")
+        print(f"  {'─'*50}")
+        print(f"  Total gate2-blocked: {total_blocked}")
+
     print(f"{'='*70}\n")
 
 

@@ -107,6 +107,49 @@ def _has_prior_touch(
     return False
 
 
+def diagnose_gate2_rejection(
+    df: pd.DataFrame,
+    candidate_idx: int,
+    zones: list[Zone],
+) -> str:
+    """Return the primary reason find_rejection returned None for this df/zones.
+
+    Priority: rejection_shape > prior_touch > grade_filter > zone_too_recent > no_active_zones
+    """
+    if not zones:
+        return "no_active_zones"
+
+    row = df.iloc[candidate_idx]
+    any_shape   = False
+    any_touched = False
+    any_grade   = False
+    any_future  = False
+
+    for zone in zones:
+        if zone.origin_index >= candidate_idx:
+            any_future = True
+            continue
+        if _has_prior_touch(df, zone, candidate_idx):
+            any_touched = True
+            continue
+        passed, grade_or_reason = validate_rejection(row, zone)
+        if not passed:
+            any_shape = True
+            continue
+        if config.MIN_SETUP_GRADE == "A+" and grade_or_reason != "A+":
+            any_grade = True
+
+    if any_shape:
+        return "rejection_shape"
+    if any_touched:
+        return "prior_touch"
+    if any_grade:
+        return "grade_filter"
+    if any_future:
+        return "zone_too_recent"
+    return "no_active_zones"
+
+
 def find_rejection(
     df: pd.DataFrame,
     candidate_idx: int,
