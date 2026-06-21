@@ -46,6 +46,7 @@ class Gate2Result:
     grade: str                # "A+" or "B" from OB rejection quality
     ltf_confirmed: list       # list of confirmed TFs e.g. ["1h", "30m"]
     confluence_stars: int     # 1, 2, or 3
+    sweep_tf: str = "4h"      # "4h" (strong) or "1h" (fallback)
 
 
 @dataclass(frozen=True)

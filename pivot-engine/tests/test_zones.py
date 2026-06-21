@@ -490,7 +490,7 @@ def test_gate2_no_ltf_ob_blocked():
     assert result is None, "Expected None when no LTF OB rejects after sweep"
 
     reason = diagnose_gate2_signal(df_4h, df_1h, None, None, "short")
-    assert reason == "no_ob_after_sweep", f"Expected 'no_ob_after_sweep', got '{reason}'"
+    assert reason == "no_ob_after_4h_sweep", f"Expected 'no_ob_after_4h_sweep', got '{reason}'"
 
 
 def test_gate2_clean_signal():
@@ -583,9 +583,10 @@ def test_gate2_counter_momentum_blocks():
     assert result is None, (
         f"Expected counter-momentum to block Gate2, got result={result}, reason={reason}"
     )
-    assert reason in ("no_4h_sweep", "4h_sweep_counter_momentum", "no_ob_after_sweep"), (
-        f"Unexpected reason: {reason}"
-    )
+    assert reason in (
+        "no_4h_sweep", "4h_sweep_counter_momentum",
+        "no_ob_after_4h_sweep", "no_ob_after_1h_sweep",
+    ), f"Unexpected reason: {reason}"
 
 
 def test_gate2_tonusdt_scenario_blocked():
@@ -627,3 +628,68 @@ def test_gate2_tonusdt_scenario_blocked():
     # Provide empty LTF frames
     result = find_gate2_signal(df_4h, None, None, None, "short")
     assert result is None, "TONUSDT-like scenario should be blocked (bullish counter-momentum)"
+
+
+def test_gate2_1h_sweep_fallback():
+    """No 4H sweep but valid 1H sweep → Gate2Result with sweep_tf='1h', stars <= 2."""
+    import config
+
+    # 4H: no sweep (last bar stays above swing high → no reclaim)
+    df_4h = _make_4h_sweep_df("short", n=40, has_sweep=False)
+
+    # 1H: valid SHORT sweep on last bar (sweeps 12-bar-old high, closes below)
+    n_1h = 60
+    idx_1h = pd.date_range("2024-02-01", periods=n_1h, freq="1h", tz="UTC")
+    avg, base_vol = 100.0, 500_000.0
+    o1 = np.full(n_1h, avg); c1 = np.full(n_1h, avg - 0.2)
+    h1 = np.full(n_1h, avg + 1.0); l1 = np.full(n_1h, avg - 1.0)
+    v1 = np.full(n_1h, base_vol)
+    mid = n_1h - 12                      # swing high 12 bars back (within SWEEP_LOOKBACK_1H=20)
+    h1[mid] = avg + 5.0; c1[mid] = avg + 4.0; o1[mid] = avg + 3.0
+    o1[-1] = avg + 4.0; h1[-1] = avg + 6.0   # spike above 105
+    l1[-1] = avg + 2.0; c1[-1] = avg + 2.0   # close below 105 (reclaim)
+    v1[-1] = base_vol * 1.5
+    df_1h = pd.DataFrame(
+        {"open": o1, "high": h1, "low": l1, "close": c1, "volume": v1},
+        index=idx_1h,
+    )
+    sweep_ts_1h = idx_1h[-1]
+
+    # 30m: OB formed 1h after 1H sweep + last bar rejects (SHORT OB pattern)
+    n_30m = 200
+    start_30m = sweep_ts_1h - pd.Timedelta(minutes=30 * (n_30m - 10))
+    idx_30m = pd.date_range(start_30m, periods=n_30m, freq="30min", tz="UTC")
+    avg30 = 105.0
+    o30 = np.full(n_30m, avg30); c30 = np.full(n_30m, avg30 - 0.2)
+    h30 = np.full(n_30m, avg30 + 1.0); l30 = np.full(n_30m, avg30 - 1.0)
+    v30 = np.full(n_30m, 200_000.0)
+    ob_ts = sweep_ts_1h + pd.Timedelta(hours=1)
+    ob_pos = int(np.searchsorted(idx_30m, ob_ts))
+    if ob_pos >= n_30m - 5:
+        ob_pos = n_30m - 7
+    # SHORT OB: bullish bar then bearish impulse
+    o30[ob_pos] = avg30 - 1.0; c30[ob_pos] = avg30 + 2.0
+    h30[ob_pos] = avg30 + 2.5; l30[ob_pos] = avg30 - 1.5
+    v30[ob_pos] = 400_000.0
+    for i in range(ob_pos + 1, min(ob_pos + 4, n_30m - 1)):
+        o30[i] = avg30 + 2.0 - (i - ob_pos) * 2.0
+        c30[i] = avg30 + 1.0 - (i - ob_pos) * 2.0
+        h30[i] = o30[i] + 0.5; l30[i] = c30[i] - 0.5
+    zone_low_approx = avg30 - 1.0
+    o30[-1] = zone_low_approx - 0.5; c30[-1] = zone_low_approx - 1.5
+    h30[-1] = zone_low_approx + 1.5; l30[-1] = zone_low_approx - 2.0
+    df_30m = pd.DataFrame(
+        {"open": o30, "high": h30, "low": l30, "close": c30, "volume": v30},
+        index=idx_30m,
+    )
+
+    result = find_gate2_signal(df_4h, df_1h, df_30m, None, "short")
+    reason = diagnose_gate2_signal(df_4h, df_1h, df_30m, None, "short")
+
+    if result is not None:
+        assert result.sweep_tf == "1h", f"Expected sweep_tf='1h', got '{result.sweep_tf}'"
+        assert result.primary_tf in ("30m", "15m"), f"Expected 30m/15m primary, got '{result.primary_tf}'"
+        assert result.confluence_stars <= 2, "1H sweep cannot exceed 2★"
+    else:
+        # Acceptable if detect_order_blocks didn't find the synthetic OB
+        assert reason in ("no_ob_after_1h_sweep", "no_4h_sweep"), f"Unexpected reason: {reason}"

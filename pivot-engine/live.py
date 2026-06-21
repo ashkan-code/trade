@@ -2,20 +2,19 @@
 
 Gates run on live API data (no CSVs):
   Gate 0: BTC 4H MSS direction
-  Gate 2: Hierarchical sweep chain — mandatory 4H sweep+reclaim, then LTF OB/FVG
-          Step 1: Find most recent valid 4H sweep (last SWEEP_LOOKBACK bars):
-                  liquidity sweep, reclaim close, volume ≥ SMA×ratio,
-                  no counter-momentum spike in prior LOOKBACK_BARS
-          Step 2: For each of 1H/30m/15m find an OB/FVG formed after sweep
-                  with last bar rejecting from it
-          Blocks if 4H sweep missing OR no LTF OB confirms
+  Gate 2: Hierarchical sweep chain — 4H sweep first, fallback to 1H sweep
+          Step 1: Find 4H sweep (last SWEEP_LOOKBACK_4H bars): sweep+reclaim,
+                  volume ≥ SMA×ratio, no counter-momentum in LOOKBACK_BARS.
+                  If found: search 1H/30m/15m OBs within SWEEP_TO_OB_MAX_BARS×4h.
+          Step 2: If no 4H sweep: find 1H sweep (last SWEEP_LOOKBACK_1H bars).
+                  If found: search 30m/15m OBs within SWEEP_TO_OB_MAX_BARS×1h.
   Gate 3: RSI + MACD advisory (logged, does not block)
   Gate 4: micro OB/FVG on 5m within primary LTF zone — scored and ranked
 
-Confluence stars (used for signal ranking):
-  ★★★  all 3 of 1H + 30m + 15m LTF OBs confirmed after sweep
-  ★★   2 LTF TFs confirmed
-  ★    1 LTF TF confirmed
+Confluence stars (4H sweep = stronger, higher minimum; 1H sweep = fallback):
+  ★★★  4H sweep + 2-3 LTF OBs confirmed (1H/30m/15m)
+  ★★   4H sweep + 1 LTF OB  OR  1H sweep + 2 LTF OBs (30m+15m)
+  ★    1H sweep + 1 LTF OB
 
 Usage:
     python live.py                # scan all symbols >= MIN_VOLUME_USD
@@ -248,7 +247,7 @@ def _scan_symbol(symbol: str, btc_direction: Direction) -> dict:
         "confluence_stars": confluence_stars,
         "micro_score": round(micro_score, 2),
         "zone_type": g2.primary_zone.zone_type,
-        "zone_tf": f"sweep→{g2.primary_tf}",
+        "zone_tf": f"sweep{g2.sweep_tf}→{g2.primary_tf}",
         "zone_low": g2.primary_zone.zone_low,
         "zone_high": g2.primary_zone.zone_high,
         "entry": refined_entry,
@@ -308,15 +307,20 @@ def _print_summary(
     if _gate2_stats:
         print(f"\n── GATE 2 REJECTION BREAKDOWN ──────────────────────────────────────")
         _reason_labels = {
-            "no_4h_sweep":               "No valid 4H sweep+reclaim found",
-            "4h_sweep_low_volume":        "4H sweep candle volume below SMA threshold",
-            "4h_sweep_counter_momentum":  "Counter-momentum before 4H sweep",
-            "no_ob_after_sweep":          "No LTF OB/FVG after sweep (1H/30m/15m)",
+            "no_4h_sweep":               "No valid 4H sweep+reclaim (fallback to 1H also failed)",
+            "4h_sweep_low_volume":        "4H sweep low volume (1H fallback also failed)",
+            "4h_sweep_counter_momentum":  "Counter-momentum blocked 4H sweep (1H also failed)",
+            "no_ob_after_4h_sweep":       "4H sweep OK — no LTF OB/FVG after it (1H/30m/15m)",
+            "no_ob_after_1h_sweep":       "1H sweep OK (4H failed) — no OB on 30m/15m",
+            "no_ob_after_sweep":          "No LTF OB/FVG after sweep",   # legacy label
             "insufficient_data":          "Insufficient 4H data",
         }
         total_blocked = sum(_gate2_stats.values())
-        for key in ["no_4h_sweep", "4h_sweep_low_volume", "4h_sweep_counter_momentum",
-                    "no_ob_after_sweep", "insufficient_data"]:
+        for key in [
+            "no_4h_sweep", "4h_sweep_low_volume", "4h_sweep_counter_momentum",
+            "no_ob_after_4h_sweep", "no_ob_after_1h_sweep",
+            "no_ob_after_sweep", "insufficient_data",
+        ]:
             count = _gate2_stats.get(key, 0)
             if count:
                 label = _reason_labels.get(key, key)
