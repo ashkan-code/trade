@@ -9,7 +9,7 @@ from contracts import Zone
 from engine.zones import (
     validate_rejection, find_rejection, find_active_zones, _has_prior_touch,
     find_sweep_rejection, diagnose_sweep_rejection, _volume_sma,
-    find_gate2_signal, diagnose_gate2_signal,
+    find_gate2_signal, diagnose_gate2_signal, _find_ltf_ob_after_sweep,
 )
 
 
@@ -693,3 +693,55 @@ def test_gate2_1h_sweep_fallback():
     else:
         # Acceptable if detect_order_blocks didn't find the synthetic OB
         assert reason in ("no_ob_after_1h_sweep", "no_4h_sweep"), f"Unexpected reason: {reason}"
+
+
+def test_ltf_ob_relaxed_zone_touch():
+    """_find_ltf_ob_after_sweep accepts wick-in-zone as Grade B (relaxed fallback).
+
+    Scenario: SHORT OB formed after sweep, last bar's wick enters zone but close
+    is still inside (strict validate_rejection would reject it). After the fix,
+    the function should return Grade B.
+    """
+    V = 1_000_000.0
+    # Proper ICT SHORT OB structure (matching debug_no_ltf_ob.py §2):
+    #   bars 0-4 : descent  (lows > 97 → enables swing-low detection)
+    #   bar  5   : swing low l=97
+    #   bars 6-9 : ascent   (lows > 97)
+    #   bar 10   : OB bullish candle  ← sweep_ts (origin_index=10, in window)
+    #   bar 11   : bearish impulse closes 93 < swing_low(97) → OB confirmed
+    #   bars 12-28: slow recovery (highs < 107 → no prior-touch)
+    #   bar 29   : h=108 >= zone_low(107), c=107 NOT < zone_low → strict FAILS, relaxed PASSES
+    bars_raw = [
+        (110, 113, 103, 109, V), (109, 112, 102, 108, V),
+        (108, 111, 101, 107, V), (107, 110, 100, 106, V), (106, 109, 99, 105, V),
+        (104, 108, 97, 99, V),       # bar 5: swing low l=97
+        (99, 102, 98, 101, V), (101, 104, 99, 103, V),
+        (103, 106, 100, 105, V), (105, 108, 101, 107, V),
+        (107, 110, 102, 109, V * 2), # bar 10: OB bullish (sweep_ts)
+        (109, 111, 92, 93, V * 3),   # bar 11: bearish impulse, close < swing_low
+    ]
+    # Bars 12-28: slow recovery, highs capped below zone_low=107
+    for i in range(17):
+        h = 95.0 + i * 0.70
+        bars_raw.append((h - 1.5, h, h - 2.0, h - 0.5, V))
+    # Bar 29: wick enters OB zone [107, 110], close=107 (inside zone_low)
+    bars_raw.append((106.0, 108.0, 105.5, 107.0, V * 1.2))
+
+    base_ts = pd.Timestamp("2024-01-01", tz="UTC")
+    idx = [base_ts + pd.Timedelta(hours=i) for i in range(len(bars_raw))]
+    df = pd.DataFrame(
+        [{"open": o, "high": h, "low": l, "close": c, "volume": v}
+         for o, h, l, c, v in bars_raw],
+        index=pd.DatetimeIndex(idx, tz="UTC"),
+    )
+
+    sweep_ts = df.index[10]  # bar 10 is the OB/sweep bar
+    result = _find_ltf_ob_after_sweep(df, sweep_ts, "short", "1h", sweep_tf_hours=1)
+
+    assert result is not None, (
+        "Expected relaxed zone-touch to produce a result (wick entered OB zone)"
+    )
+    zone, grade, entry, shadow = result
+    assert grade == "B", f"Expected Grade B (relaxed touch), got '{grade}'"
+    assert entry == zone.zone_low, "SHORT entry should be zone_low"
+    assert shadow == float(df.iloc[-1]["high"]), "SHORT SL anchor = last bar high"

@@ -316,9 +316,20 @@ def _find_ltf_ob_after_sweep(
         if _has_prior_touch(df_ltf, zone, last_idx):
             continue
         passed, grade_or_reason = validate_rejection(last_row, zone)
-        if not passed:
-            continue
-        grade = grade_or_reason
+        if passed:
+            grade = grade_or_reason
+        else:
+            # Relaxed fallback: accept if last bar's wick has entered the zone.
+            # This covers FVGs and OBs where price is approaching/touching but
+            # the close hasn't yet exited the zone edge (pending-entry signal).
+            lh = float(last_row["high"])
+            ll = float(last_row["low"])
+            if direction == "short" and lh >= zone.zone_low:
+                grade = "B"
+            elif direction == "long" and ll <= zone.zone_high:
+                grade = "B"
+            else:
+                continue
         if best_zone is None or (grade == "A+" and best_grade != "A+"):
             best_zone = zone
             best_grade = grade

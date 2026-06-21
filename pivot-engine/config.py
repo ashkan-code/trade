@@ -21,7 +21,7 @@ SWEEP_MAX_CANDLES: int = 2      # kept for backward compat
 SWEEP_LOOKBACK_4H: int = 10           # 4H bars to look back for a swept swing level
 SWEEP_LOOKBACK_1H: int = 20           # 1H bars to look back (smaller candles → wider window)
 SWEEP_LOOKBACK: int = SWEEP_LOOKBACK_4H   # backward compat (used by find_sweep_rejection)
-SWEEP_TO_OB_MAX_BARS: int = 6      # max TF-bar-equivalents after sweep to find LTF OB
+SWEEP_TO_OB_MAX_BARS: int = 12     # max TF-bar-equivalents after sweep to find LTF OB
 VOLUME_MIN_RATIO: float = 1.0         # rejection candle volume >= this × SMA(volume,9)
 VOLUME_SPIKE_MULTIPLIER: float = 2.0  # counter-momentum spike threshold (opposite-direction candle)
 LOOKBACK_BARS: int = 5                # bars before sweep to check for counter-institutional momentum
