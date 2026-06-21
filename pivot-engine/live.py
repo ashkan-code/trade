@@ -2,11 +2,14 @@
 
 Gates run on live API data (no CSVs):
   Gate 0: BTC 4H MSS direction
-  Gate 2: OB/FVG rejection candle on 4H (fallback to 1H)
+  Gate 2: OB/FVG rejection candle on 4H and/or 1H (both checked for confluence)
   Gate 3: RSI + MACD advisory (logged, does not block)
-  Gate 4: 5m entry refinement
+  Gate 4: micro OB/FVG on 5m within HTF zone — scored and ranked
 
-No backtest metrics gate — this is a live screener, not a backtest validator.
+Multi-TF confluence levels (used for signal ranking):
+  ★★★  4H zone + 1H zone overlap + 5m micro OB found
+  ★★   4H zone + 1H zone overlap (no 5m micro)
+  ★    single-timeframe rejection
 
 Usage:
     python live.py                # scan all symbols >= MIN_VOLUME_USD
@@ -28,13 +31,13 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import config
+from contracts import Direction, MicroEntry, RejectionCandle
 from data.fetcher import fetch_ohlcv, get_all_symbols, get_top_symbols
-from engine.ict import detect_mss, atr_scalar
-from engine.zones import find_active_zones, find_rejection
+from engine.entry import find_micro_entry, zones_overlap
+from engine.ict import atr_scalar, detect_mss
 from engine.indicators import gate3_passes
-from engine.entry import optimize_entry
-from engine.sl_tp import compute_sl, find_tp, compute_rr
-from contracts import Direction
+from engine.sl_tp import compute_rr, compute_sl, find_tp
+from engine.zones import find_active_zones, find_rejection
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
 _SIGNALS_FILE = os.path.join(_BASE, "logs", "live_signals.json")
@@ -48,21 +51,18 @@ logging.basicConfig(
 _log = logging.getLogger(__name__)
 
 _CANDLES: dict[str, int] = {
-    "4h": 300,   # ~50 days — enough for OB/FVG detection + warmup
+    "4h": 300,   # ~50 days
     "1h": 500,   # ~21 days
-    "5m": 288,   # ~1 day — entry refinement only
+    "5m": 288,   # ~1 day
 }
 
-_RATE_DELAY = 0.25  # seconds between API requests within one symbol's fetch sequence
+_RATE_DELAY = 0.25  # seconds between sequential API requests per symbol
 
 _print_lock = threading.Lock()
 
 
 def scan(symbols: list[str]) -> list[dict]:
-    """Scan a pre-built list of symbols. Returns list of active signal dicts.
-
-    `symbols` must include config.BTC_SYMBOL as the first entry.
-    """
+    """Scan a pre-built list of symbols. Returns list of active signal dicts."""
     alts = [s for s in symbols if s != config.BTC_SYMBOL]
 
     print(f"\n{'='*60}")
@@ -90,7 +90,7 @@ def scan(symbols: list[str]) -> list[dict]:
     print(f"\n[2/3] {len(alts)} symbols ready\n")
 
     # ── Step 3: parallel scan ─────────────────────────────────────────────────
-    print(f"[3/3] Scanning …  (. = no signal, S = signal)\n")
+    print(f"[3/3] Scanning …  (. = no signal, ★ = signal)\n")
     active: list[dict] = []
     blocked_count = 0
     completed = 0
@@ -110,16 +110,15 @@ def scan(symbols: list[str]) -> list[dict]:
 
             if result.get("signal") == "active":
                 active.append(result)
+                conf = result.get("confluence", "★")
                 with _print_lock:
-                    g3 = "G3✓" if result.get("gate3") else "G3·"
                     print(
-                        f"  SIGNAL  {symbol:<16} {btc_direction.upper():<5}  "
-                        f"grade={result['grade']}  {g3}  "
+                        f"  {conf}  [{completed:>4}/{total}]  {symbol:<16} "
+                        f"{btc_direction.upper():<5}  grade={result['grade']}  "
+                        f"G3={'✓' if result.get('gate3') else '·'}  "
                         f"entry={result['entry']:.4f}  "
-                        f"stop={result['stop']:.4f}  "
-                        f"target={result['target']:.4f}  "
                         f"R:R={result['rr']:.2f}  "
-                        f"[{completed}/{total}]"
+                        f"score={result.get('micro_score', 0):.1f}"
                     )
             else:
                 blocked_count += 1
@@ -133,11 +132,12 @@ def scan(symbols: list[str]) -> list[dict]:
 
 
 def _scan_symbol(symbol: str, btc_direction: Direction) -> dict:
-    """Fetch live data and run gates 2-4 for one symbol."""
+    """Fetch live data, run gates 2-4, compute multi-TF confluence."""
 
     def _block(reason: str) -> dict:
         return {"symbol": symbol, "signal": None, "reason": reason}
 
+    # ── Fetch data ──────────────────────────────────────────────────────────────
     df_4h = fetch_ohlcv(symbol, config.HTF, limit=_CANDLES["4h"])
     time.sleep(_RATE_DELAY)
     if df_4h is None or df_4h.empty:
@@ -151,32 +151,54 @@ def _scan_symbol(symbol: str, btc_direction: Direction) -> dict:
 
     direction: Direction = btc_direction
 
-    # Gate 2: rejection candle on 4H (fallback 1H)
+    # ── Gate 2: check BOTH 4H and 1H independently for confluence ──────────────
     zones_4h = find_active_zones(df_4h, direction, config.HTF)
-    rejection = find_rejection(df_4h, len(df_4h) - 1, zones_4h)
+    rejection_4h: RejectionCandle | None = find_rejection(df_4h, len(df_4h) - 1, zones_4h)
 
-    if rejection is None and df_1h is not None and not df_1h.empty:
+    rejection_1h: RejectionCandle | None = None
+    if df_1h is not None and not df_1h.empty:
         zones_1h = find_active_zones(df_1h, direction, config.HTF_ALT)
-        rejection = find_rejection(df_1h, len(df_1h) - 1, zones_1h)
+        rejection_1h = find_rejection(df_1h, len(df_1h) - 1, zones_1h)
 
-    if rejection is None:
+    if rejection_4h is None and rejection_1h is None:
         return _block("gate2: no rejection candle")
 
-    # Gate 3: RSI + MACD advisory
+    # Primary rejection: prefer 4H (higher TF weight)
+    primary: RejectionCandle = rejection_4h if rejection_4h is not None else rejection_1h  # type: ignore[assignment]
+
+    # ── Gate 3: RSI + MACD advisory ────────────────────────────────────────────
     ref_df = df_1h if (df_1h is not None and not df_1h.empty) else df_4h
     gate3_ok = gate3_passes(ref_df, direction)
 
-    # Gate 4: 5m entry refinement
-    zone = rejection.zone
-    as_of_ts = df_4h.index[-1]
-    if df_5m is not None and not df_5m.empty:
-        refined_entry = optimize_entry(df_5m, zone, direction, as_of_ts)
-    else:
-        refined_entry = rejection.entry
+    # ── Confluence level ────────────────────────────────────────────────────────
+    confluence_stars = 1
+    if rejection_4h is not None and rejection_1h is not None:
+        if zones_overlap(rejection_4h.zone, rejection_1h.zone):
+            confluence_stars = 2
 
-    # SL / TP
-    atr_val = atr_scalar(df_4h, config.ATR_PERIOD)
-    sl_price = compute_sl(direction, rejection.shadow_extreme, atr_val)
+    # ── Gate 4: micro OB/FVG on 5m within primary HTF zone ────────────────────
+    as_of_ts = df_4h.index[-1]
+    micro: MicroEntry | None = None
+    if df_5m is not None and not df_5m.empty:
+        atr_5m_val = atr_scalar(df_5m, config.ATR_5m_PERIOD)
+        micro = find_micro_entry(
+            df_5m, primary.zone, direction, as_of_ts, atr_5m_val, config.LTF
+        )
+        if micro is not None and confluence_stars == 2:
+            confluence_stars = 3
+
+    # ── Entry and SL ────────────────────────────────────────────────────────────
+    if micro is not None:
+        refined_entry = micro.entry
+        atr_sl = atr_scalar(df_5m, config.ATR_5m_PERIOD)  # type: ignore[arg-type]
+        sl_price = compute_sl(direction, micro.shadow_extreme, atr_sl)
+        micro_score = micro.score
+    else:
+        refined_entry = primary.entry
+        sl_price = compute_sl(direction, primary.shadow_extreme, atr_scalar(df_4h, config.ATR_PERIOD))
+        micro_score = 0.0
+
+    # ── TP ──────────────────────────────────────────────────────────────────────
     tp_ref = df_1h if (df_1h is not None and not df_1h.empty) else df_4h
     tp_price = find_tp(direction, refined_entry, sl_price, tp_ref)
 
@@ -187,16 +209,21 @@ def _scan_symbol(symbol: str, btc_direction: Direction) -> dict:
     if rr < config.MIN_RR:
         return _block(f"R:R={rr:.2f} < {config.MIN_RR}")
 
+    confluence_str = "★" * confluence_stars
+
     return {
         "symbol": symbol,
         "direction": direction,
         "signal": "active",
-        "grade": rejection.grade,
+        "grade": primary.grade,
         "gate3": gate3_ok,
-        "zone_type": zone.zone_type,
-        "zone_tf": zone.timeframe,
-        "zone_low": round(zone.zone_low, 6),
-        "zone_high": round(zone.zone_high, 6),
+        "confluence": confluence_str,
+        "confluence_stars": confluence_stars,
+        "micro_score": round(micro_score, 2),
+        "zone_type": primary.zone.zone_type,
+        "zone_tf": primary.zone.timeframe,
+        "zone_low": round(primary.zone.zone_low, 6),
+        "zone_high": round(primary.zone.zone_high, 6),
         "entry": round(refined_entry, 6),
         "stop": round(sl_price, 6),
         "target": round(tp_price, 6),
@@ -211,27 +238,42 @@ def _print_summary(
     btc_direction: Direction,
     total: int,
 ) -> None:
-    print(f"\n{'='*60}")
+    print(f"\n{'='*70}")
     print(f"SCAN COMPLETE  {_ts()}")
     print(f"Scanned: {total}  Active: {len(active)}  Blocked: {blocked_count}")
     print(f"BTC direction: {btc_direction.upper()}")
 
     if active:
-        print(f"\n── ACTIVE SIGNALS ──────────────────────────────────────")
-        header = f"  {'SYMBOL':<16} {'DIR':<5} {'GRADE':<6} {'G3':<4} {'ZONE':<18} {'ENTRY':>10} {'STOP':>10} {'TARGET':>10} {'R:R':>5}"
-        print(header)
-        print(f"  {'-'*len(header.strip())}")
-        for s in active:
+        # Sort: confluence desc, then micro_score desc
+        ranked = sorted(
+            active,
+            key=lambda s: (s["confluence_stars"], s["micro_score"]),
+            reverse=True,
+        )
+        print(f"\n── ACTIVE SIGNALS (ranked by multi-TF confluence) ──────────────────")
+        hdr = (
+            f"  {'CONF':<5} {'SYMBOL':<16} {'DIR':<5} {'GRADE':<5} "
+            f"{'G3':<3} {'SCORE':>5} {'ENTRY':>10} {'STOP':>10} {'TARGET':>10} {'R:R':>5}"
+        )
+        print(hdr)
+        print(f"  {'-' * (len(hdr) - 2)}")
+        for s in ranked:
             g3 = "✓" if s.get("gate3") else "·"
-            zone_str = f"{s['zone_type']} {s['zone_tf']}"
             print(
-                f"  {s['symbol']:<16} {s['direction'].upper():<5} "
-                f"{s['grade']:<6} {g3:<4} {zone_str:<18} "
+                f"  {s['confluence']:<5} {s['symbol']:<16} {s['direction'].upper():<5} "
+                f"{s['grade']:<5} {g3:<3} {s['micro_score']:>5.1f} "
                 f"{s['entry']:>10.4f} {s['stop']:>10.4f} {s['target']:>10.4f} {s['rr']:>5.2f}"
+            )
+        print()
+        print("  Zone detail:")
+        for s in ranked:
+            print(
+                f"    {s['symbol']:<16} zone [{s['zone_type']} {s['zone_tf']}]  "
+                f"{s['zone_low']}–{s['zone_high']}"
             )
     else:
         print("\n  No active signals.")
-    print(f"{'='*60}\n")
+    print(f"{'='*70}\n")
 
 
 def _write_signals(active: list[dict]) -> None:
@@ -249,7 +291,7 @@ def _ts() -> str:
 
 
 def _parse_volume(s: str) -> float:
-    """Parse '5m' → 5_000_000, '1.5m' → 1_500_000, '500k' → 500_000, '1000000' → 1_000_000."""
+    """Parse '5m' → 5_000_000, '500k' → 500_000, '1000000' → 1_000_000."""
     s = s.strip().lower()
     if s.endswith("m"):
         return float(s[:-1]) * 1_000_000
@@ -263,11 +305,11 @@ if __name__ == "__main__":
     group = parser.add_mutually_exclusive_group()
     group.add_argument(
         "--top", type=int, metavar="N",
-        help=f"Scan only top N symbols by 24h volume (default: all >= MIN_VOLUME_USD)",
+        help="Scan only top N symbols by 24h volume",
     )
     group.add_argument(
         "--min-vol", type=str, metavar="USD", default=None,
-        help=f"Min 24h USDT turnover, e.g. 5m or 500k (default: {config.MIN_VOLUME_USD:,.0f})",
+        help=f"Min 24h USDT turnover e.g. 5m or 500k (default: {config.MIN_VOLUME_USD:,.0f})",
     )
     args = parser.parse_args()
 

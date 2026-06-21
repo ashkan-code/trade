@@ -30,7 +30,7 @@ from data.loader import get_ohlcv
 from engine.ict import detect_mss, atr_scalar
 from engine.zones import find_active_zones, find_rejection
 from engine.indicators import gate3_passes
-from engine.entry import optimize_entry
+from engine.entry import find_micro_entry
 from engine.sl_tp import compute_sl, find_tp, compute_rr
 from report.generator import generate
 from sigbuild.builder import build
@@ -147,14 +147,20 @@ def _process(
     live_setup: Setup | None = None
     if rejection is not None:
         zone = rejection.zone
-        atr_val = atr_scalar(df_4h, config.ATR_PERIOD)
-        sl_price = compute_sl(direction, rejection.shadow_extreme, atr_val)
+        atr_4h = atr_scalar(df_4h, config.ATR_PERIOD)
 
-        # Gate 4: 5m entry refinement (never cancels a confirmed rejection)
+        # Gate 4: micro OB/FVG on 5m — refines entry AND SL if found
+        micro = None
         if df_5m is not None:
-            refined_entry = optimize_entry(df_5m, zone, direction, df_4h.index[-1])
+            atr_5m = atr_scalar(df_5m, config.ATR_5m_PERIOD)
+            micro = find_micro_entry(df_5m, zone, direction, df_4h.index[-1], atr_5m)
+
+        if micro is not None:
+            refined_entry = micro.entry
+            sl_price = compute_sl(direction, micro.shadow_extreme, atr_scalar(df_5m, config.ATR_5m_PERIOD))
         else:
             refined_entry = rejection.entry
+            sl_price = compute_sl(direction, rejection.shadow_extreme, atr_4h)
 
         ref_for_tp = df_1h if df_1h is not None else df_4h
         tp_price = find_tp(direction, refined_entry, sl_price, ref_for_tp)

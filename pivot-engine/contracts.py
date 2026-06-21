@@ -34,6 +34,14 @@ class RejectionCandle:
 
 
 @dataclass(frozen=True)
+class MicroEntry:
+    entry: float
+    shadow_extreme: float   # LTF candle low (long) or high (short) — refined SL anchor
+    score: float            # 0–12 composite quality score
+    zone: "Zone"            # the LTF micro OB used
+
+
+@dataclass(frozen=True)
 class Setup:
     entry_low: float      # zone bottom (or refined 5m entry)
     entry_high: float     # zone top (entry trigger)
