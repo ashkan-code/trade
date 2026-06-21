@@ -34,7 +34,7 @@ MACD_SLOW: int = 26
 MACD_SIGNAL_LEN: int = 9
 
 # Gate 4 — micro entry (LTF OB/FVG)
-DISPLACEMENT_ATR_MIN: float = 0.5    # impulse after OB must be >= this × ATR_5m to qualify
+DISPLACEMENT_ATR_MIN: float = 0.25   # impulse after OB must be >= this × ATR_5m to qualify
 
 # Risk management
 SL_BUFFER: float = 0.5          # % (of zone height) buffer behind zone edge for SL

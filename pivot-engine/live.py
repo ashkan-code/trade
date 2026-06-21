@@ -21,12 +21,14 @@ from __future__ import annotations
 
 import argparse
 import logging
+import math
 import os
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -111,12 +113,13 @@ def scan(symbols: list[str]) -> list[dict]:
             if result.get("signal") == "active":
                 active.append(result)
                 conf = result.get("confluence", "★")
+                _dp = result.get("price_dp", _price_decimals(result["entry"]))
                 with _print_lock:
                     print(
                         f"  {conf}  [{completed:>4}/{total}]  {symbol:<16} "
                         f"{btc_direction.upper():<5}  grade={result['grade']}  "
                         f"G3={'✓' if result.get('gate3') else '·'}  "
-                        f"entry={result['entry']:.4f}  "
+                        f"entry={result['entry']:.{_dp}f}  "
                         f"R:R={result['rr']:.2f}  "
                         f"score={result.get('micro_score', 0):.1f}"
                     )
@@ -183,7 +186,8 @@ def _scan_symbol(symbol: str, btc_direction: Direction) -> dict:
     if df_5m is not None and not df_5m.empty:
         atr_5m_val = atr_scalar(df_5m, config.ATR_5m_PERIOD)
         micro = find_micro_entry(
-            df_5m, primary.zone, direction, None, atr_5m_val, config.LTF
+            df_5m, primary.zone, direction, None, atr_5m_val, config.LTF,
+            lookback_bars=96,
         )
         if micro is not None and confluence_stars == 2:
             confluence_stars = 3
@@ -211,6 +215,7 @@ def _scan_symbol(symbol: str, btc_direction: Direction) -> dict:
         return _block(f"R:R={rr:.2f} < {config.MIN_RR}")
 
     confluence_str = "★" * confluence_stars
+    price_dp = _price_decimals(refined_entry)
 
     return {
         "symbol": symbol,
@@ -223,12 +228,13 @@ def _scan_symbol(symbol: str, btc_direction: Direction) -> dict:
         "micro_score": round(micro_score, 2),
         "zone_type": primary.zone.zone_type,
         "zone_tf": primary.zone.timeframe,
-        "zone_low": round(primary.zone.zone_low, 6),
-        "zone_high": round(primary.zone.zone_high, 6),
-        "entry": round(refined_entry, 6),
-        "stop": round(sl_price, 6),
-        "target": round(tp_price, 6),
+        "zone_low": primary.zone.zone_low,
+        "zone_high": primary.zone.zone_high,
+        "entry": refined_entry,
+        "stop": sl_price,
+        "target": tp_price,
         "rr": round(rr, 2),
+        "price_dp": price_dp,
         "timestamp": _ts(),
     }
 
@@ -254,23 +260,25 @@ def _print_summary(
         print(f"\n── ACTIVE SIGNALS (ranked by multi-TF confluence) ──────────────────")
         hdr = (
             f"  {'CONF':<5} {'SYMBOL':<16} {'DIR':<5} {'GRADE':<5} "
-            f"{'G3':<3} {'SCORE':>5} {'ENTRY':>10} {'STOP':>10} {'TARGET':>10} {'R:R':>5}"
+            f"{'G3':<3} {'SCORE':>5} {'ENTRY':>14} {'STOP':>14} {'TARGET':>14} {'R:R':>5}"
         )
         print(hdr)
         print(f"  {'-' * (len(hdr) - 2)}")
         for s in ranked:
             g3 = "✓" if s.get("gate3") else "·"
+            dp = s.get("price_dp", _price_decimals(s["entry"]))
             print(
                 f"  {s['confluence']:<5} {s['symbol']:<16} {s['direction'].upper():<5} "
                 f"{s['grade']:<5} {g3:<3} {s['micro_score']:>5.1f} "
-                f"{s['entry']:>10.4f} {s['stop']:>10.4f} {s['target']:>10.4f} {s['rr']:>5.2f}"
+                f"{s['entry']:>{14}.{dp}f} {s['stop']:>{14}.{dp}f} {s['target']:>{14}.{dp}f} {s['rr']:>5.2f}"
             )
         print()
         print("  Zone detail:")
         for s in ranked:
+            dp = s.get("price_dp", _price_decimals(s["zone_low"]))
             print(
                 f"    {s['symbol']:<16} zone [{s['zone_type']} {s['zone_tf']}]  "
-                f"{s['zone_low']}–{s['zone_high']}"
+                f"{s['zone_low']:.{dp}f}–{s['zone_high']:.{dp}f}"
             )
     else:
         print("\n  No active signals.")
@@ -287,8 +295,19 @@ def _write_signals(active: list[dict]) -> None:
         _log.error("%s failed to write live_signals.json: %s", _ts(), exc)
 
 
+def _price_decimals(price: float) -> int:
+    """Decimal places needed to show at least 4 significant digits (minimum 2).
+
+    Examples: 105000 → 2,  1.5 → 3,  0.0001234 → 7
+    """
+    if price <= 0:
+        return 6
+    mag = math.floor(math.log10(abs(price)))
+    return max(4 - 1 - mag, 2)
+
+
 def _ts() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    return datetime.now(ZoneInfo("Asia/Tehran")).strftime("%Y-%m-%d %H:%M:%S Tehran")
 
 
 def _parse_volume(s: str) -> float:
