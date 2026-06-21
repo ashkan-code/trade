@@ -2,14 +2,16 @@
 
 Gates run on live API data (no CSVs):
   Gate 0: BTC 4H MSS direction
-  Gate 2: OB/FVG rejection candle on 4H and/or 1H (both checked for confluence)
+  Gate 2: ICT/Wyckoff sweep+reclaim on ANY of 4H / 1H / 30m / 15m
+          Sweep conditions: liquidity sweep, reclaim close, volume ≥ SMA×ratio,
+          no counter-institutional momentum spike in prior LOOKBACK_BARS
   Gate 3: RSI + MACD advisory (logged, does not block)
-  Gate 4: micro OB/FVG on 5m within HTF zone — scored and ranked
+  Gate 4: micro OB/FVG on 5m within HTF sweep zone — scored and ranked
 
 Multi-TF confluence levels (used for signal ranking):
-  ★★★  4H zone + 1H zone overlap + 5m micro OB found
-  ★★   4H zone + 1H zone overlap (no 5m micro)
-  ★    single-timeframe rejection
+  ★★★  4H + 1H sweep zones overlap + (30m or 15m also overlaps, or 5m micro found)
+  ★★   4H + 1H sweep zones overlap in price
+  ★    single-timeframe sweep
 
 Usage:
     python live.py                # scan all symbols >= MIN_VOLUME_USD
@@ -39,7 +41,7 @@ from engine.entry import find_micro_entry, zones_overlap
 from engine.ict import atr_scalar, detect_mss
 from engine.indicators import gate3_passes
 from engine.sl_tp import compute_rr, compute_sl, find_tp
-from engine.zones import diagnose_gate2_rejection, find_active_zones, find_rejection
+from engine.zones import diagnose_sweep_rejection, find_sweep_rejection
 
 _BASE = os.path.dirname(os.path.abspath(__file__))
 _SIGNALS_FILE = os.path.join(_BASE, "logs", "live_signals.json")
@@ -55,10 +57,12 @@ _log = logging.getLogger(__name__)
 _CANDLES: dict[str, int] = {
     "4h": 300,   # ~50 days
     "1h": 500,   # ~21 days
+    "30m": 240,  # ~5 days
+    "15m": 192,  # ~2 days
     "5m": 288,   # ~1 day
 }
 
-_RATE_DELAY = 0.25  # seconds between sequential API requests per symbol
+_RATE_DELAY = 0.25  # seconds between sequential API requests per symbol (legacy; _fetch_all_tfs is parallel)
 
 _print_lock = threading.Lock()
 
@@ -139,64 +143,95 @@ def scan(symbols: list[str]) -> list[dict]:
     return active
 
 
+def _fetch_all_tfs(symbol: str) -> dict[str, "pd.DataFrame | None"]:
+    """Fetch 4H, 1H, 30m, 15m, 5m concurrently (bounded by _HTTP_SEM in fetcher)."""
+    tf_limits = [
+        ("4h",  _CANDLES["4h"]),
+        ("1h",  _CANDLES["1h"]),
+        ("30m", _CANDLES["30m"]),
+        ("15m", _CANDLES["15m"]),
+        ("5m",  _CANDLES["5m"]),
+    ]
+    results: dict = {}
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        futures = {pool.submit(fetch_ohlcv, symbol, tf, lim): tf for tf, lim in tf_limits}
+        for fut in as_completed(futures):
+            tf = futures[fut]
+            try:
+                results[tf] = fut.result()
+            except Exception as exc:
+                _log.error("%s fetch %s %s: %s", _ts(), symbol, tf, exc)
+                results[tf] = None
+    return results
+
+
 def _scan_symbol(symbol: str, btc_direction: Direction) -> dict:
-    """Fetch live data, run gates 2-4, compute multi-TF confluence."""
+    """Fetch live data, run gates 2-4, compute multi-TF sweep confluence."""
 
     def _block(reason: str) -> dict:
         return {"symbol": symbol, "signal": None, "reason": reason}
 
-    # ── Fetch data ──────────────────────────────────────────────────────────────
-    df_4h = fetch_ohlcv(symbol, config.HTF, limit=_CANDLES["4h"])
-    time.sleep(_RATE_DELAY)
+    # ── Fetch all timeframes in parallel ────────────────────────────────────────
+    dfs = _fetch_all_tfs(symbol)
+    df_4h  = dfs.get("4h")
+    df_1h  = dfs.get("1h")
+    df_30m = dfs.get("30m")
+    df_15m = dfs.get("15m")
+    df_5m  = dfs.get("5m")
+
     if df_4h is None or df_4h.empty:
         return _block("4H data unavailable")
 
-    df_1h = fetch_ohlcv(symbol, config.HTF_ALT, limit=_CANDLES["1h"])
-    time.sleep(_RATE_DELAY)
-
-    df_5m = fetch_ohlcv(symbol, config.LTF, limit=_CANDLES["5m"])
-    time.sleep(_RATE_DELAY)
-
     direction: Direction = btc_direction
 
-    # ── Gate 2: check BOTH 4H and 1H independently for confluence ──────────────
-    zones_4h = find_active_zones(df_4h, direction, config.HTF)
-    rejection_4h: RejectionCandle | None = find_rejection(df_4h, len(df_4h) - 1, zones_4h)
+    # ── Gate 2: ICT sweep on each TF (passes if ANY TF passes) ─────────────────
+    def _sw(df: "pd.DataFrame | None", tf: str) -> "RejectionCandle | None":
+        if df is None or df.empty:
+            return None
+        return find_sweep_rejection(df, direction, tf)
 
-    zones_1h: list = []
-    rejection_1h: RejectionCandle | None = None
-    if df_1h is not None and not df_1h.empty:
-        zones_1h = find_active_zones(df_1h, direction, config.HTF_ALT)
-        rejection_1h = find_rejection(df_1h, len(df_1h) - 1, zones_1h)
+    sweep_4h  = _sw(df_4h,  config.HTF)
+    sweep_1h  = _sw(df_1h,  config.HTF_ALT)
+    sweep_30m = _sw(df_30m, "30m")
+    sweep_15m = _sw(df_15m, "15m")
 
-    if rejection_4h is None and rejection_1h is None:
-        # Diagnostic: determine the primary reason both TFs have no rejection
-        reason_4h = diagnose_gate2_rejection(df_4h, len(df_4h) - 1, zones_4h)
-        if df_1h is not None and not df_1h.empty:
-            reason_1h = diagnose_gate2_rejection(df_1h, len(df_1h) - 1, zones_1h)
-            # Report the 4H reason as primary (higher-TF signal is the gating factor)
-            gate2_reason = reason_4h
-        else:
-            gate2_reason = reason_4h
+    if not any([sweep_4h, sweep_1h, sweep_30m, sweep_15m]):
+        # Diagnostic: best reason across TFs (counter_momentum > volume > sweep)
+        best_reason = "sweep_not_found"
+        for df_tf in [df_4h, df_1h, df_30m, df_15m]:
+            if df_tf is None or df_tf.empty:
+                continue
+            r = diagnose_sweep_rejection(df_tf, direction)
+            if r == "counter_momentum":
+                best_reason = "counter_momentum"
+                break
+            if r == "volume_min_ratio" and best_reason == "sweep_not_found":
+                best_reason = "volume_min_ratio"
         with _print_lock:
-            _gate2_stats[gate2_reason] = _gate2_stats.get(gate2_reason, 0) + 1
-        return _block(f"gate2: {gate2_reason}")
+            _gate2_stats[best_reason] = _gate2_stats.get(best_reason, 0) + 1
+        return _block(f"gate2: {best_reason}")
 
-    # Primary rejection: prefer 4H (higher TF weight)
-    primary: RejectionCandle = rejection_4h if rejection_4h is not None else rejection_1h  # type: ignore[assignment]
+    # Primary sweep: prefer higher timeframe
+    primary: RejectionCandle = (sweep_4h or sweep_1h or sweep_30m or sweep_15m)  # type: ignore[assignment]
 
     # ── Gate 3: RSI + MACD advisory ────────────────────────────────────────────
     ref_df = df_1h if (df_1h is not None and not df_1h.empty) else df_4h
     gate3_ok = gate3_passes(ref_df, direction)
 
     # ── Confluence level ────────────────────────────────────────────────────────
-    # ★★: any 4H zone overlaps any 1H zone in price (independent of last-bar rejection)
+    # ★★:  4H + 1H sweep zones overlap in price
+    # ★★★: 4H + 1H + (30m or 15m) zones overlap
     confluence_stars = 1
-    if zones_1h and any(zones_overlap(z4, z1) for z4 in zones_4h for z1 in zones_1h):
+    if sweep_4h and sweep_1h and zones_overlap(sweep_4h.zone, sweep_1h.zone):
         confluence_stars = 2
+        ltf_ok = (
+            (sweep_30m and zones_overlap(sweep_4h.zone, sweep_30m.zone)) or
+            (sweep_15m and zones_overlap(sweep_4h.zone, sweep_15m.zone))
+        )
+        if ltf_ok:
+            confluence_stars = 3
 
     # ── Gate 4: micro OB/FVG on 5m within primary HTF zone ────────────────────
-    # Pass None so all closed 5m bars are eligible (no 4H open-time cutoff)
     micro: MicroEntry | None = None
     if df_5m is not None and not df_5m.empty:
         atr_5m_val = atr_scalar(df_5m, config.ATR_5m_PERIOD)
@@ -210,8 +245,7 @@ def _scan_symbol(symbol: str, btc_direction: Direction) -> dict:
     # ── Entry and SL ────────────────────────────────────────────────────────────
     if micro is not None:
         refined_entry = micro.entry
-        atr_sl = atr_scalar(df_5m, config.ATR_5m_PERIOD)  # type: ignore[arg-type]
-        sl_price = compute_sl(direction, micro.shadow_extreme, atr_sl)
+        sl_price = compute_sl(direction, micro.shadow_extreme, atr_scalar(df_5m, config.ATR_5m_PERIOD))  # type: ignore[arg-type]
         micro_score = micro.score
     else:
         refined_entry = primary.entry
@@ -229,16 +263,13 @@ def _scan_symbol(symbol: str, btc_direction: Direction) -> dict:
     if rr < config.MIN_RR:
         return _block(f"R:R={rr:.2f} < {config.MIN_RR}")
 
-    confluence_str = "★" * confluence_stars
-    price_dp = _price_decimals(refined_entry)
-
     return {
         "symbol": symbol,
         "direction": direction,
         "signal": "active",
         "grade": primary.grade,
         "gate3": gate3_ok,
-        "confluence": confluence_str,
+        "confluence": "★" * confluence_stars,
         "confluence_stars": confluence_stars,
         "micro_score": round(micro_score, 2),
         "zone_type": primary.zone.zone_type,
@@ -249,7 +280,7 @@ def _scan_symbol(symbol: str, btc_direction: Direction) -> dict:
         "stop": sl_price,
         "target": tp_price,
         "rr": round(rr, 2),
-        "price_dp": price_dp,
+        "price_dp": _price_decimals(refined_entry),
         "timestamp": _ts(),
     }
 
@@ -298,18 +329,17 @@ def _print_summary(
     else:
         print("\n  No active signals.")
 
-    # ── Gate 2 rejection breakdown ──────────────────────────────────────────────
+    # ── Gate 2 sweep rejection breakdown ───────────────────────────────────────
     if _gate2_stats:
-        print(f"\n── GATE 2 REJECTION BREAKDOWN ──────────────────────────────────────")
+        print(f"\n── GATE 2 SWEEP REJECTION BREAKDOWN ───────────────────────────────")
         _reason_labels = {
-            "rejection_shape":  "Rejection shape failed (wick/penetration/close)",
-            "prior_touch":      "Zone already touched (single-touch rule)",
-            "grade_filter":     "Grade filter (MIN_SETUP_GRADE=A+ required)",
-            "zone_too_recent":  "No zone formed before the candle",
-            "no_active_zones":  "No active OB/FVG zones detected",
+            "sweep_not_found":   "No sweep+reclaim on any TF (4H/1H/30m/15m)",
+            "volume_min_ratio":  "Rejection candle volume below SMA threshold",
+            "counter_momentum":  "Counter-institutional momentum spike detected",
+            "insufficient_data": "Insufficient data for sweep detection",
         }
         total_blocked = sum(_gate2_stats.values())
-        for key in ["rejection_shape", "prior_touch", "grade_filter", "zone_too_recent", "no_active_zones"]:
+        for key in ["sweep_not_found", "volume_min_ratio", "counter_momentum", "insufficient_data"]:
             count = _gate2_stats.get(key, 0)
             if count:
                 label = _reason_labels.get(key, key)

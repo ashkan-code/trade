@@ -17,7 +17,13 @@ MIN_LB: int = 3
 MAX_LB: int = 20
 SWEEP_MAX_CANDLES: int = 2      # kept for backward compat
 
-# Gate 2 — rejection filter
+# Gate 2 — sweep detection (ICT/Wyckoff)
+SWEEP_LOOKBACK: int = 10              # bars to look back for swing levels that were swept
+VOLUME_MIN_RATIO: float = 1.0         # rejection candle volume >= this × SMA(volume,9)
+VOLUME_SPIKE_MULTIPLIER: float = 2.0  # counter-momentum spike threshold (opposite-direction candle)
+LOOKBACK_BARS: int = 5                # bars before sweep to check for counter-institutional momentum
+
+# Gate 2 — shape scoring (no longer hard filters; used for grade A+/B)
 PENETRATION_MIN: float = 0.20   # shadow must enter >= 20% of zone height
 WICK_RATIO_MIN: float = 1.0     # rejection wick must be >= 1× body
 MIN_SETUP_GRADE: str = "B"      # "A+" or "B"; A+ = body entirely outside zone

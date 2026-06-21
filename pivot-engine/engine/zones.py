@@ -1,11 +1,16 @@
-"""Gate 2: OB/FVG rejection detection.
+"""Gate 2: ICT/Wyckoff liquidity sweep + reclaim detection.
 
-Core rejection rule:
-  LONG : low  <= zone_high  AND  close > zone_high   (shadow enters, close exits above)
-  SHORT: high >= zone_low   AND  close < zone_low    (shadow enters, close exits below)
+Sweep rule (all 4 must pass):
+  1. Last candle swept a recent swing high (SHORT) or low (LONG) within SWEEP_LOOKBACK bars.
+  2. Candle closed back below swept high (SHORT) / above swept low (LONG) — the reclaim.
+  3. Rejection candle volume >= VOLUME_MIN_RATIO × SMA(volume, 9).
+  4. No counter-institutional spike (>= VOLUME_SPIKE_MULTIPLIER × SMA9 in opposite direction)
+     within LOOKBACK_BARS before the sweep.
 
-Grade A+: body entirely outside zone (open AND close both beyond zone edge).
-Grade B : close beyond zone edge, body partially inside.
+Grade A+: body entirely outside swept level (open AND close both beyond).
+Grade B : close reclaimed, body partially overlaps.
+
+Legacy OB/FVG functions kept for backward compatibility.
 """
 
 from __future__ import annotations
@@ -17,6 +22,153 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 from contracts import Direction, RejectionCandle, Zone
 from engine.ict import detect_fvg, detect_order_blocks
+
+
+def _volume_sma(df: pd.DataFrame, idx: int, period: int = 9) -> float:
+    """SMA of volume over up to `period` bars ending at idx (inclusive)."""
+    if idx < 0:
+        return 0.0
+    start = max(0, idx - period + 1)
+    vols = df["volume"].iloc[start : idx + 1]
+    return float(vols.mean()) if len(vols) else 0.0
+
+
+def find_sweep_rejection(
+    df: pd.DataFrame,
+    direction: Direction,
+    timeframe: str = "",
+) -> RejectionCandle | None:
+    """Gate 2: liquidity sweep + reclaim + Wyckoff volume confirmation.
+
+    Checks the LAST closed candle of df. Returns RejectionCandle on pass, None on failure.
+    """
+    n = len(df)
+    if n < config.SWEEP_LOOKBACK + 10:
+        return None
+
+    candidate_idx = n - 1
+    row = df.iloc[candidate_idx]
+    h = float(row["high"])
+    l = float(row["low"])
+    c = float(row["close"])
+    o = float(row["open"])
+    vol = float(row["volume"])
+
+    lb_start = max(0, candidate_idx - config.SWEEP_LOOKBACK)
+
+    # 1 & 2: sweep + reclaim
+    if direction == "short":
+        swing_arr = df["high"].values[lb_start:candidate_idx]
+        if len(swing_arr) == 0:
+            return None
+        swing_level = float(swing_arr.max())
+        origin_int = lb_start + int(swing_arr.argmax())
+        if not (h > swing_level and c < swing_level):
+            return None
+    else:
+        swing_arr = df["low"].values[lb_start:candidate_idx]
+        if len(swing_arr) == 0:
+            return None
+        swing_level = float(swing_arr.min())
+        origin_int = lb_start + int(swing_arr.argmin())
+        if not (l < swing_level and c > swing_level):
+            return None
+
+    # 3: rejection candle volume check
+    vol_sma = _volume_sma(df, candidate_idx - 1)
+    if vol_sma > 0 and vol < config.VOLUME_MIN_RATIO * vol_sma:
+        return None
+
+    # 4: no counter-institutional spike in LOOKBACK_BARS before the sweep
+    check_start = max(0, candidate_idx - config.LOOKBACK_BARS)
+    for i in range(check_start, candidate_idx):
+        prev = df.iloc[i]
+        prev_vol = float(prev["volume"])
+        sma_i = _volume_sma(df, i - 1)
+        if sma_i <= 0 or prev_vol < config.VOLUME_SPIKE_MULTIPLIER * sma_i:
+            continue
+        is_bullish = float(prev["close"]) > float(prev["open"])
+        if direction == "short" and is_bullish:
+            return None
+        if direction == "long" and not is_bullish:
+            return None
+
+    # Build zone and grade
+    if direction == "short":
+        zone = Zone(
+            zone_type="ob", direction="short",
+            zone_high=h, zone_low=swing_level,
+            origin_index=origin_int, timeframe=timeframe,
+        )
+        entry = swing_level
+        shadow_extreme = h
+    else:
+        zone = Zone(
+            zone_type="ob", direction="long",
+            zone_high=swing_level, zone_low=l,
+            origin_index=origin_int, timeframe=timeframe,
+        )
+        entry = swing_level
+        shadow_extreme = l
+
+    body = abs(c - o)
+    wick = (h - max(o, c)) if direction == "short" else (min(o, c) - l)
+    grade: str = "A+" if body > 0 and wick >= body else "B"
+
+    return RejectionCandle(
+        candle_index=candidate_idx,
+        grade=grade,  # type: ignore[arg-type]
+        zone=zone,
+        entry=entry,
+        shadow_extreme=shadow_extreme,
+    )
+
+
+def diagnose_sweep_rejection(df: pd.DataFrame, direction: Direction) -> str:
+    """Return primary reason find_sweep_rejection returned None (for diagnostic logging)."""
+    n = len(df)
+    if n < config.SWEEP_LOOKBACK + 10:
+        return "insufficient_data"
+
+    candidate_idx = n - 1
+    row = df.iloc[candidate_idx]
+    h = float(row["high"])
+    l = float(row["low"])
+    c = float(row["close"])
+    vol = float(row["volume"])
+
+    lb_start = max(0, candidate_idx - config.SWEEP_LOOKBACK)
+
+    if direction == "short":
+        swing_arr = df["high"].values[lb_start:candidate_idx]
+        swing_level = float(swing_arr.max()) if len(swing_arr) else 0.0
+        swept_and_reclaimed = h > swing_level and c < swing_level
+    else:
+        swing_arr = df["low"].values[lb_start:candidate_idx]
+        swing_level = float(swing_arr.min()) if len(swing_arr) else float("inf")
+        swept_and_reclaimed = l < swing_level and c > swing_level
+
+    if not swept_and_reclaimed:
+        return "sweep_not_found"
+
+    vol_sma = _volume_sma(df, candidate_idx - 1)
+    if vol_sma > 0 and vol < config.VOLUME_MIN_RATIO * vol_sma:
+        return "volume_min_ratio"
+
+    check_start = max(0, candidate_idx - config.LOOKBACK_BARS)
+    for i in range(check_start, candidate_idx):
+        prev = df.iloc[i]
+        prev_vol = float(prev["volume"])
+        sma_i = _volume_sma(df, i - 1)
+        if sma_i <= 0 or prev_vol < config.VOLUME_SPIKE_MULTIPLIER * sma_i:
+            continue
+        is_bullish = float(prev["close"]) > float(prev["open"])
+        if direction == "short" and is_bullish:
+            return "counter_momentum"
+        if direction == "long" and not is_bullish:
+            return "counter_momentum"
+
+    return "passed"
 
 
 def find_active_zones(
