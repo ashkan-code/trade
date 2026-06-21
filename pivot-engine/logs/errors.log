@@ -27,3 +27,23 @@
 2026-06-20 05:17:56,857 ERROR 2026-06-20T05:17:56.857423+00:00 no data returned for ETHUSDT
 2026-06-20 05:17:56,857 ERROR 2026-06-20T05:17:56.857460+00:00 ETHUSDT [long]: fetch failed
 2026-06-20 05:23:08,054 WARNING 2026-06-20T05:23:08.054892+00:00 BLOCKED SYNTH: gate2: no rejection setup found; metrics: flag=unreliable
+2026-06-21 16:22:11,524 ERROR 2026-06-21T16:22:11.523964+00:00 fetch attempt 1/3 failed for TONUSDT: 403 Client Error: Forbidden for url: https://fapi.bitunix.com/api/v1/futures/market/kline?symbol=TONUSDT&interval=4h&startTime=1779178930916&endTime=1782058930916
+2026-06-21 16:22:16,637 ERROR 2026-06-21T16:22:16.637345+00:00 fetch attempt 2/3 failed for TONUSDT: 403 Client Error: Forbidden for url: https://fapi.bitunix.com/api/v1/futures/market/kline?symbol=TONUSDT&interval=4h&startTime=1779178930916&endTime=1782058930916
+2026-06-21 16:22:26,749 ERROR 2026-06-21T16:22:26.749593+00:00 fetch attempt 3/3 failed for TONUSDT: 403 Client Error: Forbidden for url: https://fapi.bitunix.com/api/v1/futures/market/kline?symbol=TONUSDT&interval=4h&startTime=1779178930916&endTime=1782058930916
+2026-06-21 16:22:26,750 ERROR 2026-06-21T16:22:26.750089+00:00 all retries exhausted for TONUSDT
+2026-06-21 16:22:26,750 ERROR 2026-06-21T16:22:26.750150+00:00 no data returned for TONUSDT
+2026-06-21 16:22:26,797 ERROR 2026-06-21T16:22:26.797422+00:00 fetch attempt 1/3 failed for TONUSDT: 403 Client Error: Forbidden for url: https://fapi.bitunix.com/api/v1/futures/market/kline?symbol=TONUSDT&interval=1h&startTime=1781338946750&endTime=1782058946750
+2026-06-21 16:22:31,848 ERROR 2026-06-21T16:22:31.848862+00:00 fetch attempt 2/3 failed for TONUSDT: 403 Client Error: Forbidden for url: https://fapi.bitunix.com/api/v1/futures/market/kline?symbol=TONUSDT&interval=1h&startTime=1781338946750&endTime=1782058946750
+2026-06-21 16:22:41,900 ERROR 2026-06-21T16:22:41.900889+00:00 fetch attempt 3/3 failed for TONUSDT: 403 Client Error: Forbidden for url: https://fapi.bitunix.com/api/v1/futures/market/kline?symbol=TONUSDT&interval=1h&startTime=1781338946750&endTime=1782058946750
+2026-06-21 16:22:41,901 ERROR 2026-06-21T16:22:41.901499+00:00 all retries exhausted for TONUSDT
+2026-06-21 16:22:41,901 ERROR 2026-06-21T16:22:41.901553+00:00 no data returned for TONUSDT
+2026-06-21 16:22:41,994 ERROR 2026-06-21T16:22:41.994271+00:00 fetch attempt 1/3 failed for TONUSDT: 403 Client Error: Forbidden for url: https://fapi.bitunix.com/api/v1/futures/market/kline?symbol=TONUSDT&interval=5m&startTime=1781998961901&endTime=1782058961901
+2026-06-21 16:22:47,089 ERROR 2026-06-21T16:22:47.089704+00:00 fetch attempt 2/3 failed for TONUSDT: 403 Client Error: Forbidden for url: https://fapi.bitunix.com/api/v1/futures/market/kline?symbol=TONUSDT&interval=5m&startTime=1781998961901&endTime=1782058961901
+2026-06-21 16:22:57,471 ERROR 2026-06-21T16:22:57.471310+00:00 fetch attempt 3/3 failed for TONUSDT: 403 Client Error: Forbidden for url: https://fapi.bitunix.com/api/v1/futures/market/kline?symbol=TONUSDT&interval=5m&startTime=1781998961901&endTime=1782058961901
+2026-06-21 16:22:57,471 ERROR 2026-06-21T16:22:57.471778+00:00 all retries exhausted for TONUSDT
+2026-06-21 16:22:57,471 ERROR 2026-06-21T16:22:57.471844+00:00 no data returned for TONUSDT
+2026-06-21 16:23:02,713 ERROR 2026-06-21T16:23:02.713005+00:00 fetch attempt 1/3 failed for TONUSDT: 403 Client Error: Forbidden for url: https://fapi.bitunix.com/api/v1/futures/market/kline?symbol=TONUSDT&interval=4h&startTime=1781914982662&endTime=1782058982662
+2026-06-21 16:23:07,849 ERROR 2026-06-21T16:23:07.849902+00:00 fetch attempt 2/3 failed for TONUSDT: 403 Client Error: Forbidden for url: https://fapi.bitunix.com/api/v1/futures/market/kline?symbol=TONUSDT&interval=4h&startTime=1781914982662&endTime=1782058982662
+2026-06-21 16:23:17,901 ERROR 2026-06-21T16:23:17.901677+00:00 fetch attempt 3/3 failed for TONUSDT: 403 Client Error: Forbidden for url: https://fapi.bitunix.com/api/v1/futures/market/kline?symbol=TONUSDT&interval=4h&startTime=1781914982662&endTime=1782058982662
+2026-06-21 16:23:17,902 ERROR 2026-06-21T16:23:17.902225+00:00 all retries exhausted for TONUSDT
+2026-06-21 16:23:17,902 ERROR 2026-06-21T16:23:17.902312+00:00 no data returned for TONUSDT
