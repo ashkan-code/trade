@@ -79,9 +79,12 @@ def find_sweep_rejection(
     if vol_sma > 0 and vol < config.VOLUME_MIN_RATIO * vol_sma:
         return None
 
-    # 4: no counter-institutional spike in LOOKBACK_BARS before the sweep
-    check_start = max(0, candidate_idx - config.LOOKBACK_BARS)
-    for i in range(check_start, candidate_idx):
+    # 4: no counter-institutional spike in the full swing lookback window.
+    # Deliberately uses lb_start (not candidate_idx - LOOKBACK_BARS) so the
+    # entire period where the swing level was forming is covered. A 5-bar window
+    # is too narrow: a 20-bar bullish rally elevates SMA9 so that individual
+    # bars stop registering as spikes by the time they enter a short lookback.
+    for i in range(lb_start, candidate_idx):
         prev = df.iloc[i]
         prev_vol = float(prev["volume"])
         sma_i = _volume_sma(df, i - 1)
@@ -155,7 +158,7 @@ def diagnose_sweep_rejection(df: pd.DataFrame, direction: Direction) -> str:
     if vol_sma > 0 and vol < config.VOLUME_MIN_RATIO * vol_sma:
         return "volume_min_ratio"
 
-    check_start = max(0, candidate_idx - config.LOOKBACK_BARS)
+    check_start = lb_start  # full swing window, same logic as find_sweep_rejection
     for i in range(check_start, candidate_idx):
         prev = df.iloc[i]
         prev_vol = float(prev["volume"])

@@ -182,6 +182,11 @@ def _scan_symbol(symbol: str, btc_direction: Direction) -> dict:
     if df_4h is None or df_4h.empty:
         return _block("4H data unavailable")
 
+    # ── Gate 1: per-symbol 4H MSS must align with BTC direction ────────────────
+    symbol_mss = detect_mss(df_4h)
+    if symbol_mss is None or symbol_mss != btc_direction:
+        return _block(f"structure_misaligned ({symbol_mss})")
+
     direction: Direction = btc_direction
 
     # ── Gate 2: ICT sweep on each TF (passes if ANY TF passes) ─────────────────

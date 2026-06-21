@@ -97,13 +97,24 @@ def find_micro_entry(
     micro_obs = detect_order_blocks(view, direction, ltf_name)
     micro_fvgs = detect_fvg(view, direction, ltf_name)
 
-    # Keep only micro OBs that:
-    #   (a) formed within the recent lookback window
-    #   (b) overlap with the HTF zone in price
+    # Build a search zone centered on the entry price ± 2×ATR.
+    # The sweep zone (htf_zone) is the narrow wick range; after the sweep,
+    # price sits OUTSIDE that range. Using entry ± 2×ATR finds OBs at the
+    # price level where a pullback will naturally arrive.
+    entry_price = htf_zone.zone_high if direction == "long" else htf_zone.zone_low
+    atr_ref = atr_ltf if atr_ltf > 0 else atr_scalar(view, config.ATR_5m_PERIOD)
+    buffer = 2.0 * atr_ref
+    search_zone = Zone(
+        zone_type="ob", direction=direction,
+        zone_high=entry_price + buffer,
+        zone_low=entry_price - buffer,
+        origin_index=0, timeframe=ltf_name,
+    )
+
     recent_start = len(view) - lookback_bars
     candidates = [
         ob for ob in micro_obs
-        if ob.origin_index >= recent_start and zones_overlap(ob, htf_zone)
+        if ob.origin_index >= recent_start and zones_overlap(ob, search_zone)
     ]
     if not candidates:
         return None
