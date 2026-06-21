@@ -63,10 +63,19 @@ WARMUP: int = 50
 
 # Scanner
 TOP_N: int = 20             # top symbols by 24h USDT turnover (used when --top N specified)
-MIN_VOLUME_USD: float = 0.0           # 0 = no volume filter — scan ALL USDT-M symbols
-MAX_CONCURRENT: int = 10    # parallel symbol workers in live scan
+MIN_VOLUME_USD: float = 600_000.0     # min 24h USDT turnover — filters illiquid symbols
+MAX_CONCURRENT: int = 10    # parallel symbol workers in live scan (do NOT raise: rate-limit risk)
 SIMILARITY_MIN: float = 0.7           # Pearson correlation threshold vs BTC pivot vector
 SIMILARITY_PIVOTS: int = 6            # number of consecutive pivot-to-pivot % changes to compare
+
+# Scanner — blocklist: non-crypto instruments (stocks, commodities) — excluded before any API call
+BLOCKLIST: list[str] = [
+    "TSLAUSDT", "COPPERUSDT", "OILUSDT", "XAUUSDT", "CLUSDT", "GASUSDT",
+]
+
+# ATR star scoring (Phase 2, not a gate — only adjusts confluence_stars for ranking)
+ATR_STRONG_MULT: float = 1.5   # body > ATR × this → confluence_stars +1 (strong momentum)
+ATR_WEAK_MULT: float = 0.8     # body < ATR × this → confluence_stars −1 (weak momentum)
 
 # Network
 RETRY_ATTEMPTS: int = 3
