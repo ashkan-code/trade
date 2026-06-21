@@ -155,6 +155,7 @@ def _scan_symbol(symbol: str, btc_direction: Direction) -> dict:
     zones_4h = find_active_zones(df_4h, direction, config.HTF)
     rejection_4h: RejectionCandle | None = find_rejection(df_4h, len(df_4h) - 1, zones_4h)
 
+    zones_1h: list = []
     rejection_1h: RejectionCandle | None = None
     if df_1h is not None and not df_1h.empty:
         zones_1h = find_active_zones(df_1h, direction, config.HTF_ALT)
@@ -171,18 +172,18 @@ def _scan_symbol(symbol: str, btc_direction: Direction) -> dict:
     gate3_ok = gate3_passes(ref_df, direction)
 
     # ── Confluence level ────────────────────────────────────────────────────────
+    # ★★: any 4H zone overlaps any 1H zone in price (independent of last-bar rejection)
     confluence_stars = 1
-    if rejection_4h is not None and rejection_1h is not None:
-        if zones_overlap(rejection_4h.zone, rejection_1h.zone):
-            confluence_stars = 2
+    if zones_1h and any(zones_overlap(z4, z1) for z4 in zones_4h for z1 in zones_1h):
+        confluence_stars = 2
 
     # ── Gate 4: micro OB/FVG on 5m within primary HTF zone ────────────────────
-    as_of_ts = df_4h.index[-1]
+    # Pass None so all closed 5m bars are eligible (no 4H open-time cutoff)
     micro: MicroEntry | None = None
     if df_5m is not None and not df_5m.empty:
         atr_5m_val = atr_scalar(df_5m, config.ATR_5m_PERIOD)
         micro = find_micro_entry(
-            df_5m, primary.zone, direction, as_of_ts, atr_5m_val, config.LTF
+            df_5m, primary.zone, direction, None, atr_5m_val, config.LTF
         )
         if micro is not None and confluence_stars == 2:
             confluence_stars = 3

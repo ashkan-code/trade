@@ -4,7 +4,7 @@ Scoring formula (max 12), inspired by LuxAlgo ICT displacement logic:
   displacement_strength × 4   impulse after OB formation (ATR-relative, capped 0–1)
   rejection_quality     × 4   OB candle body/range ratio (capped 0–1)
   has_fvg_confluence    × 2   micro OB price range overlaps a LTF FVG (0 or 1)
-  freshness             × 2   OB never touched since formation (0 or 1)
+  freshness             × 2   OB not re-touched after the initial impulse (0 or 1)
 
 Only OBs where impulse >= config.DISPLACEMENT_ATR_MIN × ATR qualify.
 Falls back to HTF zone edge if no qualifying micro OB found.
@@ -42,12 +42,12 @@ def _score_micro_ob(
     closes = df["close"].values
 
     # 1. Displacement: impulse in the 1-3 bars after OB formation
-    end = min(idx + 4, n)
+    impulse_end = min(idx + 4, n)
     if direction == "long":
-        post = highs[idx + 1 : end]
+        post = highs[idx + 1 : impulse_end]
         impulse = (float(post.max()) - ob.zone_high) if len(post) else 0.0
     else:
-        post = lows[idx + 1 : end]
+        post = lows[idx + 1 : impulse_end]
         impulse = (ob.zone_low - float(post.min())) if len(post) else 0.0
     displacement = min(max(impulse / atr_val, 0.0), 1.0) if atr_val > 0 else 0.0
 
@@ -59,11 +59,11 @@ def _score_micro_ob(
     # 3. FVG confluence: any LTF FVG overlaps this OB's price range
     has_fvg = int(any(zones_overlap(ob, fvg) for fvg in fvg_zones))
 
-    # 4. Freshness: OB not touched (mitigated) since formation
+    # 4. Freshness: OB not re-touched AFTER the initial impulse (skip impulse bars)
     if direction == "long":
-        touched = any(float(lows[k]) <= ob.zone_high for k in range(idx + 1, n))
+        touched = any(float(lows[k]) <= ob.zone_high for k in range(impulse_end, n))
     else:
-        touched = any(float(highs[k]) >= ob.zone_low for k in range(idx + 1, n))
+        touched = any(float(highs[k]) >= ob.zone_low for k in range(impulse_end, n))
     freshness = 0 if touched else 1
 
     score = displacement * 4 + rejection_quality * 4 + has_fvg * 2 + freshness * 2
@@ -76,36 +76,41 @@ def find_micro_entry(
     df_ltf: pd.DataFrame,
     htf_zone: Zone,
     direction: Direction,
-    as_of_ts: pd.Timestamp,
-    atr_ltf: float,
+    as_of_ts: "pd.Timestamp | None" = None,
+    atr_ltf: float = 0.0,
     ltf_name: str = "5m",
     lookback_bars: int = 48,
 ) -> MicroEntry | None:
     """Find the highest-scoring micro OB inside htf_zone on a lower timeframe.
 
+    FIX: OB detection runs on the FULL view so swing detection has adequate
+    context, then candidates are filtered to those formed within lookback_bars.
     Only OBs with impulse >= DISPLACEMENT_ATR_MIN × ATR_LTF qualify.
-    Returns None if nothing qualifies; callers fall back to HTF zone edge + HTF shadow.
+    Returns None if nothing qualifies; callers fall back to HTF zone edge.
     """
-    view = df_ltf[df_ltf.index <= as_of_ts]
+    view = df_ltf if as_of_ts is None else df_ltf[df_ltf.index <= as_of_ts]
     min_bars = config.OB_SWING_LOOKBACK + config.SWING_LEN + 4
     if len(view) < min_bars:
         return None
 
-    search = view.iloc[-lookback_bars:]
-    if len(search) < min_bars:
-        return None
+    # Detect on FULL view so swing context isn't clipped at the lookback boundary
+    micro_obs = detect_order_blocks(view, direction, ltf_name)
+    micro_fvgs = detect_fvg(view, direction, ltf_name)
 
-    micro_obs = detect_order_blocks(search, direction, ltf_name)
-    micro_fvgs = detect_fvg(search, direction, ltf_name)
-
-    # Keep only micro OBs whose price range overlaps the HTF zone
-    candidates = [ob for ob in micro_obs if zones_overlap(ob, htf_zone)]
+    # Keep only micro OBs that:
+    #   (a) formed within the recent lookback window
+    #   (b) overlap with the HTF zone in price
+    recent_start = len(view) - lookback_bars
+    candidates = [
+        ob for ob in micro_obs
+        if ob.origin_index >= recent_start and zones_overlap(ob, htf_zone)
+    ]
     if not candidates:
         return None
 
-    highs = search["high"].values
-    lows = search["low"].values
-    n = len(search)
+    highs = view["high"].values
+    lows = view["low"].values
+    n = len(view)
 
     best: MicroEntry | None = None
     best_score = -1.0
@@ -125,7 +130,7 @@ def find_micro_entry(
         if atr_ltf > 0 and (impulse / atr_ltf) < config.DISPLACEMENT_ATR_MIN:
             continue
 
-        score, shadow = _score_micro_ob(search, ob, micro_fvgs, atr_ltf, direction)
+        score, shadow = _score_micro_ob(view, ob, micro_fvgs, atr_ltf, direction)
         if score > best_score:
             best_score = score
             entry = ob.zone_high if direction == "long" else ob.zone_low
@@ -143,13 +148,10 @@ def optimize_entry(
     df_5m: pd.DataFrame,
     zone: Zone,
     direction: Direction,
-    as_of_ts: pd.Timestamp,
+    as_of_ts: "pd.Timestamp | None" = None,
     lookback_bars: int = 48,
 ) -> float:
-    """Backward-compat wrapper: returns entry price only.
-
-    Prefer find_micro_entry() directly when you also need the refined SL.
-    """
+    """Backward-compat wrapper: returns entry price only."""
     atr_val = atr_scalar(df_5m, config.ATR_5m_PERIOD)
     micro = find_micro_entry(df_5m, zone, direction, as_of_ts, atr_val, "5m", lookback_bars)
     return micro.entry if micro is not None else (
