@@ -101,36 +101,109 @@ def _fetch_btc_cached() -> "pd.DataFrame | None":
     return df
 
 
-# ── BTC direction debug (item 6) ─────────────────────────────────────────────
+# ── Gate 0: BTC current-state bias ───────────────────────────────────────────
 
-def _print_btc_debug(df_btc: "pd.DataFrame", direction: Direction) -> None:
-    """Print Gate 0 diagnostics each scan to verify no hidden directional bias.
+def _btc_bias(df_btc: "pd.DataFrame") -> "tuple[str, dict]":
+    """Score BTC *current* state from 4 momentum indicators.
 
-    Shows: MSS direction, RSI value + label, last close, price position in
-    the most recent 20-bar range. This confirms the filter works both ways
-    (long and short) and is not biased toward one side.
+    Returns (direction, debug_dict).
+    direction is 'long' | 'short' | 'neutral'.
+
+    Scoring (+1 bullish, -1 bearish, 0 neutral each):
+        ema_cross : EMA20 > EMA50 → +1 ; else → -1
+        ema_slope : EMA20[-1] > EMA20[-5] by 0.01% → +1 ; < → -1 ; flat → 0
+        macd_hist : histogram last bar > 0 → +1 ; < 0 → -1 ; 0 → 0
+        rsi_level : RSI > BTC_RSI_BULL(55) → +1 ; < BTC_RSI_BEAR(45) → -1 ; else → 0
+
+    score ≥ +2 → 'long'
+    score ≤ -2 → 'short'
+    else       → 'neutral' (market inconclusive — scan aborts)
+
+    Extra NEUTRAL override: if RSI in [45,55] AND pos in [35,65]% → 'neutral'
+    (price mid-range, indicators flat — no edge).
     """
-    try:
-        rsi_s = _rsi(df_btc["close"], config.RSI_LEN)
-        rsi_val = float(rsi_s.iloc[-1]) if len(rsi_s) else float("nan")
-        last_close = float(df_btc["close"].iloc[-1])
-        recent_high = float(df_btc["high"].tail(20).max())
-        recent_low  = float(df_btc["low"].tail(20).min())
-        span = recent_high - recent_low
-        pos_pct = (last_close - recent_low) / span * 100 if span > 0 else 50.0
-        rsi_label = (
-            "OVERBOUGHT" if rsi_val >= config.RSI_OB else
-            "OVERSOLD"   if rsi_val <= config.RSI_OS else
-            "neutral"
-        )
-        print(
-            f"      [BTC DEBUG] MSS={direction.upper()}  "
-            f"RSI={rsi_val:.1f}({rsi_label})  "
-            f"close={last_close:.0f}  "
-            f"pos={pos_pct:.0f}% in 20-bar range [{recent_low:.0f}–{recent_high:.0f}]"
-        )
-    except Exception as exc:
-        print(f"      [BTC DEBUG] diagnostic error: {exc}")
+    import numpy as np
+    from engine.indicators import macd as _macd
+
+    n = len(df_btc)
+    if n < 60:
+        return "neutral", {"reason": "insufficient_data", "bars": n}
+
+    closes = df_btc["close"]
+
+    ema20 = closes.ewm(span=20, adjust=False).mean()
+    ema50 = closes.ewm(span=50, adjust=False).mean()
+    ema20_now  = float(ema20.iloc[-1])
+    ema50_now  = float(ema50.iloc[-1])
+    ema20_5ago = float(ema20.iloc[-6]) if n >= 6 else ema20_now
+
+    _, _, hist = _macd(closes, config.MACD_FAST, config.MACD_SLOW, config.MACD_SIGNAL_LEN)
+    macd_hist_val = float(hist.iloc[-1])
+
+    rsi_s   = _rsi(closes, config.RSI_LEN)
+    rsi_val = float(rsi_s.iloc[-1])
+
+    recent_high = float(df_btc["high"].tail(20).max())
+    recent_low  = float(df_btc["low"].tail(20).min())
+    span        = recent_high - recent_low
+    pos_pct     = (float(closes.iloc[-1]) - recent_low) / span * 100 if span > 0 else 50.0
+
+    ema_cross = 1 if ema20_now > ema50_now else -1
+    ema_slope = (
+        1  if ema20_now > ema20_5ago * 1.0001 else
+        -1 if ema20_now < ema20_5ago * 0.9999 else
+        0
+    )
+    macd_sig = 1 if macd_hist_val > 0 else (-1 if macd_hist_val < 0 else 0)
+    rsi_sig  = (
+        1  if rsi_val > config.BTC_RSI_BULL else
+        -1 if rsi_val < config.BTC_RSI_BEAR else
+        0
+    )
+    score = ema_cross + ema_slope + macd_sig + rsi_sig
+
+    dbg = {
+        "ema20":       round(ema20_now, 2),
+        "ema50":       round(ema50_now, 2),
+        "ema_cross":   ema_cross,
+        "ema_slope":   ema_slope,
+        "macd_hist":   round(macd_hist_val, 4),
+        "macd_sig":    macd_sig,
+        "rsi":         round(rsi_val, 1),
+        "rsi_sig":     rsi_sig,
+        "score":       score,
+        "pos_pct":     round(pos_pct, 1),
+        "close":       round(float(closes.iloc[-1]), 0),
+    }
+
+    # Range-neutral override
+    if config.BTC_RSI_BEAR <= rsi_val <= config.BTC_RSI_BULL and config.BTC_POS_LO <= pos_pct <= config.BTC_POS_HI:
+        dbg["reason"] = f"range_neutral(RSI={rsi_val:.1f} pos={pos_pct:.0f}%)"
+        return "neutral", dbg
+
+    if score >= config.BTC_SCORE_LONG:
+        dbg["reason"] = f"score={score}>=+{config.BTC_SCORE_LONG}"
+        return "long", dbg
+    if score <= config.BTC_SCORE_SHORT:
+        dbg["reason"] = f"score={score}<={config.BTC_SCORE_SHORT}"
+        return "short", dbg
+
+    dbg["reason"] = f"score={score}(inconclusive)"
+    return "neutral", dbg
+
+
+def _print_btc_debug(direction: str, dbg: dict) -> None:
+    """Print Gate 0 bias line showing all 4 indicators + score."""
+    c = {1: "▲", -1: "▼", 0: "→"}
+    print(
+        f"      [BTC BIAS] {direction.upper():<8}  score={dbg['score']}  "
+        f"EMAcross{c[dbg['ema_cross']]}({dbg['ema_cross']:+d})  "
+        f"EMAslope{c[dbg['ema_slope']]}({dbg['ema_slope']:+d})  "
+        f"MACD{c[dbg['macd_sig']]}({dbg['macd_sig']:+d})={dbg['macd_hist']}  "
+        f"RSI{c[dbg['rsi_sig']]}({dbg['rsi_sig']:+d})={dbg['rsi']}  "
+        f"pos={dbg['pos_pct']}%  close={dbg['close']:.0f}  "
+        f"reason={dbg['reason']}"
+    )
 
 
 # ── Main scan entry point ─────────────────────────────────────────────────────
@@ -166,13 +239,14 @@ def scan(symbols: list[str]) -> list[dict]:
         print("      ERROR: BTC data unavailable — aborting scan.")
         return []
 
-    btc_direction: Direction | None = detect_mss(df_btc)
-    if btc_direction is None:
-        print("      BTC MSS undetermined — no dominant structure. Aborting.")
+    btc_direction, btc_dbg = _btc_bias(df_btc)
+    _print_btc_debug(btc_direction, btc_dbg)
+
+    if btc_direction == "neutral":
+        print("      BTC NEUTRAL — signals contradictory or market ranging. Aborting scan.")
         return []
 
     print(f"      BTC direction: {btc_direction.upper()}")
-    _print_btc_debug(df_btc, btc_direction)   # item 6
 
     # ── Phase 1: all symbols, 4H+1H only (item 1) ────────────────────────────
     t_scan_start = time.time()

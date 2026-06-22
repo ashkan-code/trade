@@ -73,6 +73,14 @@ BLOCKLIST: list[str] = [
     "TSLAUSDT", "COPPERUSDT", "OILUSDT", "XAUUSDT", "CLUSDT", "GASUSDT",
 ]
 
+# Gate 0 — BTC current-state bias (EMA + MACD + RSI scoring)
+BTC_RSI_BULL: float = 55.0   # RSI above this → +1 (bullish)
+BTC_RSI_BEAR: float = 45.0   # RSI below this → −1 (bearish)
+BTC_POS_LO: float = 35.0     # price pos % lower bound for range-neutral override
+BTC_POS_HI: float = 65.0     # price pos % upper bound for range-neutral override
+BTC_SCORE_LONG: int = 2      # score >= this → LONG
+BTC_SCORE_SHORT: int = -2    # score <= this → SHORT
+
 # ATR star scoring (Phase 2, not a gate — only adjusts confluence_stars for ranking)
 ATR_STRONG_MULT: float = 1.5   # body > ATR × this → confluence_stars +1 (strong momentum)
 ATR_WEAK_MULT: float = 0.8     # body < ATR × this → confluence_stars −1 (weak momentum)
