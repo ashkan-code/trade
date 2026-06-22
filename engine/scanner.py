@@ -34,10 +34,13 @@ def run_scan() -> list[SignalDict]:
     """
     logger.info("Starting market scan")
 
-    # BTC direction
+    # BTC direction (Gate 0) — btc_bias prints its own debug line
     try:
         df_btc_4h = get_candles(config.BTC_SYMBOL, "4H")
         btc_direction = check_btc_direction(df_btc_4h)
+        if btc_direction is None:
+            logger.info("BTC direction NEUTRAL — market ranging, scan aborted")
+            return []
         logger.info("BTC 4H direction: %s", btc_direction)
     except Exception as exc:
         logger.error("Failed to get BTC direction: %s", exc)

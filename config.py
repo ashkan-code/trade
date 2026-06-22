@@ -28,6 +28,14 @@ STOP_BUFFER_PCT = 0.001  # 0.1% buffer beyond OB for stop placement
 SCORE_THRESHOLD = 0.75
 MAX_POSITIONS_PER_DAY = 2
 
+# ── Gate 0 — BTC current-state bias ──────────────────────────────────────────
+BTC_RSI_BULL = 55.0     # RSI above this → bullish signal (+1)
+BTC_RSI_BEAR = 45.0     # RSI below this → bearish signal (−1)
+BTC_POS_LO   = 35.0     # price position % in 20-bar range: below → not ranging
+BTC_POS_HI   = 65.0     # price position % in 20-bar range: above → not ranging
+BTC_SCORE_LONG  = 2     # total score >= this → LONG
+BTC_SCORE_SHORT = -2    # total score <= this → SHORT
+
 # ── Infrastructure ────────────────────────────────────────────────────────────
 CACHE_TTL_SECONDS = 60
 RATE_LIMIT_DELAY = 0.2   # seconds between API requests

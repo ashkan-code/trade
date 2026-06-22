@@ -10,7 +10,7 @@ from core.ict import (
     MSSDict, OBDict, FVGDict, LiqDict,
     detect_mss, detect_order_blocks, detect_fvg,
 )
-from core.indicators import rsi, macd, rsi_confirm_long, rsi_confirm_short, macd_confirm_long, macd_confirm_short
+from core.indicators import rsi, macd, rsi_confirm_long, rsi_confirm_short, macd_confirm_long, macd_confirm_short, btc_bias
 
 logger = logging.getLogger(__name__)
 
@@ -29,11 +29,39 @@ class ZoneDict(TypedDict):
     timeframe: str
 
 
-# ── BTC direction ─────────────────────────────────────────────────────────────
+# ── BTC direction (Gate 0) ────────────────────────────────────────────────────
 
 def check_btc_direction(df_btc_4h: pd.DataFrame) -> Optional[str]:
-    mss = detect_mss(df_btc_4h)
-    return mss["direction"]
+    """Return 'bullish'|'bearish'|None based on current-state bias, not stale MSS history.
+
+    Uses btc_bias() which scores EMA cross, EMA slope, MACD histogram, and RSI.
+    Returns None when neutral (caller should abort scan).
+    Prints a one-line debug summary on every call.
+    """
+    direction, dbg = btc_bias(df_btc_4h)
+    _print_btc_bias_debug(direction, dbg)
+
+    if direction == "long":
+        return "bullish"
+    if direction == "short":
+        return "bearish"
+    return None  # neutral → scanner aborts
+
+
+def _print_btc_bias_debug(direction: str, dbg: dict) -> None:
+    cross_sym = "▲" if dbg.get("ema_cross", 0) > 0 else "▼"
+    slope_sym = "↑" if dbg.get("ema_slope", 0) > 0 else ("↓" if dbg.get("ema_slope", 0) < 0 else "→")
+    macd_sym  = "▲" if dbg.get("macd_sig",  0) > 0 else ("▼" if dbg.get("macd_sig",  0) < 0 else "−")
+    rsi_sym   = "▲" if dbg.get("rsi_sig",   0) > 0 else ("▼" if dbg.get("rsi_sig",   0) < 0 else "−")
+    print(
+        f"[BTC BIAS] {direction.upper():<8}  score={dbg.get('score', '?')}  "
+        f"EMAcross{cross_sym}({dbg.get('ema_cross',0):+d})  "
+        f"EMAslope{slope_sym}({dbg.get('ema_slope',0):+d})  "
+        f"MACD{macd_sym}({dbg.get('macd_sig',0):+d})  "
+        f"RSI{rsi_sym}({dbg.get('rsi_sig',0):+d})={dbg.get('rsi','?')}  "
+        f"pos={dbg.get('pos_pct','?')}%  "
+        f"reason={dbg.get('reason','')}"
+    )
 
 
 # ── Alignment ─────────────────────────────────────────────────────────────────
