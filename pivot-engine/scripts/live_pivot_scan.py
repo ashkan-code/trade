@@ -199,6 +199,15 @@ def _scan_symbol(
         df_1h = fetch_ohlcv(sym, "1h", limit=_LIMIT_1H)
         df_1d = fetch_ohlcv(sym, "1d", limit=_LIMIT_1D)
         setup = _confluence(df_4h, df_1h, df_1d, scan_dir)
+
+        if setup is not None:
+            _cl   = float(df_4h.iloc[-1]["close"])
+            _atr  = atr_scalar(df_4h, config.ATR_PERIOD)
+            _vols = df_4h["volume"].to_numpy()
+            _avgv = float(np.mean(_vols[-20:])) if len(_vols) >= 20 else float(np.mean(_vols))
+            setup["atr_pct"]   = round((_atr / _cl * 100.0) if _cl > 0 else 0.0, 4)
+            setup["vol_ratio"] = round(float(_vols[-1]) / _avgv if _avgv > 0 else 0.0, 4)
+
         del df_4h, df_1h, df_1d  # free RAM immediately (Termux-safe)
 
         if setup is None:
@@ -217,6 +226,32 @@ def _scan_symbol(
 
     finally:
         time.sleep(0.1)  # rate-limit safety per worker
+
+
+# ── quality filter ────────────────────────────────────────────────────────────
+
+def _classify_setups(setups: list[dict]) -> None:
+    """Classify valid setups by ATR% (>0.5%) and volume ratio (>1.5×avg-20)."""
+    confirmed: list[str] = []
+    weak:      list[str] = []
+    skip_:     list[str] = []
+
+    for s in setups:
+        atr_ok = s.get("atr_pct",   0.0) > 0.5
+        vol_ok = s.get("vol_ratio", 0.0) > 1.5
+        sym    = s["symbol"]
+        if atr_ok and vol_ok:
+            confirmed.append(sym)
+        elif atr_ok or vol_ok:
+            weak.append(sym)
+        else:
+            skip_.append(sym)
+
+    print()
+    print("=== BEST SETUPS ===")
+    print(f"CONFIRMED: {confirmed}")
+    print(f"WEAK:      {weak}")
+    print(f"SKIP:      {skip_}")
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
@@ -335,6 +370,8 @@ def main() -> None:
             )
     else:
         print("No valid setups found.")
+
+    _classify_setups(valid_setups)
 
     print()
     print(
