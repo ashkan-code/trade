@@ -25,6 +25,8 @@ import argparse
 import sys
 import os
 import time
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -170,6 +172,65 @@ def _confluence(
     }
 
 
+# ── per-symbol worker (runs inside ThreadPoolExecutor) ────────────────────────
+
+def _scan_symbol(
+    sym: str,
+    btc_vec: list[float] | None,
+    scan_dir: str | None,
+) -> tuple[bool, dict | None, str]:
+    """Layer 1 + 2 for a single symbol.
+
+    Returns (passed_layer1, setup_or_None, log_line).
+    Thread-safe: no shared mutable state written here.
+    """
+    try:
+        df_4h = fetch_ohlcv(sym, "4h", limit=_LIMIT_4H)
+        if df_4h is None or len(df_4h) < config.WARMUP + 10:
+            return False, None, ""
+
+        as_of   = len(df_4h) - 1
+        lb      = adaptive_lookback(df_4h, as_of)
+        pivs    = find_pivots(df_4h, as_of, lb)
+        sym_vec = _pivot_vector(pivs, config.SIMILARITY_PIVOTS)
+
+        # LAYER 1 — similarity gate
+        if btc_vec is not None:
+            if sym_vec is None:
+                return False, None, ""
+            sim = _pearson(btc_vec, sym_vec)
+            if sim < config.SIMILARITY_MIN:
+                return False, None, ""
+        else:
+            sim = float("nan")
+
+        sim_str = f"{sim:.3f}" if sim == sim else "N/A"  # nan-safe
+
+        # LAYER 2 — fetch remaining TFs and run confluence
+        df_1h = fetch_ohlcv(sym, "1h", limit=_LIMIT_1H)
+        df_1d = fetch_ohlcv(sym, "1d", limit=_LIMIT_1D)
+        setup = _confluence(df_4h, df_1h, df_1d, scan_dir)
+        del df_4h, df_1h, df_1d  # free RAM immediately (Termux-safe)
+
+        if setup is None:
+            log = f"  {sym:<12}  sim={sim_str}  pivots={len(pivs)}  no confluence"
+            return True, None, log
+
+        setup["symbol"]     = sym
+        setup["similarity"] = round(sim, 3) if sim == sim else None
+        log = (
+            f"  {sym:<12}  sim={sim_str}  pivots={len(pivs)}"
+            f"  SIGNAL {setup['direction'].upper()} R:R={setup['rr']:.2f}"
+        )
+        return True, setup, log
+
+    except Exception as exc:
+        return False, None, f"  SKIP {sym}: {exc}"
+
+    finally:
+        time.sleep(0.1)  # rate-limit safety per worker
+
+
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -242,63 +303,28 @@ def main() -> None:
     alt_symbols = [s for s in symbols if s != "BTCUSDT"]
     print(f"Symbols to scan: {len(alt_symbols)} (BTC already done)")
 
-    # ── Per-symbol loop ───────────────────────────────────────────────────────
-    n_scanned  = 0
-    n_similar  = 0
+    # ── Parallel per-symbol scan ──────────────────────────────────────────────
+    n_scanned    = 0
+    n_similar    = 0
     valid_setups: list[dict] = []
+    _print_lock  = threading.Lock()
 
-    for sym in alt_symbols:
-        n_scanned += 1
-
-        try:
-            # Fetch 4h first; compute similarity before spending time on 1h/1d
-            df_4h = fetch_ohlcv(sym, "4h", limit=_LIMIT_4H)
-            if df_4h is None or len(df_4h) < config.WARMUP + 10:
-                time.sleep(0.05)
-                continue
-
-            as_of = len(df_4h) - 1
-            lb    = adaptive_lookback(df_4h, as_of)
-            pivs  = find_pivots(df_4h, as_of, lb)
-            sym_vec = _pivot_vector(pivs, config.SIMILARITY_PIVOTS)
-
-            # LAYER 1 — similarity gate
-            if btc_vec is not None:
-                if sym_vec is None:
-                    time.sleep(0.05)
-                    continue       # too few pivots for comparison
-                sim = _pearson(btc_vec, sym_vec)
-                if sim < config.SIMILARITY_MIN:
-                    time.sleep(0.05)
-                    continue
-            else:
-                sim = float("nan")  # BTC vector unavailable; skip similarity filter
-
-            n_similar += 1
-            sim_str = f"{sim:.3f}" if sim == sim else "N/A"  # nan check
-            print(f"  {sym:<12}  sim={sim_str}  pivots={len(pivs)}  [Layer 2...]", end="", flush=True)
-
-            # LAYER 2 — fetch remaining TFs and run confluence
-            df_1h = fetch_ohlcv(sym, "1h", limit=_LIMIT_1H)
-            df_1d = fetch_ohlcv(sym, "1d", limit=_LIMIT_1D)
-
-            setup = _confluence(df_4h, df_1h, df_1d, scan_dir)
-
-            # Free memory immediately (RAM-safe for Termux)
-            del df_4h, df_1h, df_1d
-
-            if setup is None:
-                print("  no confluence")
-            else:
-                print(f"  SIGNAL {setup['direction'].upper()} R:R={setup['rr']:.2f}")
-                setup["symbol"]     = sym
-                setup["similarity"] = round(sim, 3) if sim == sim else None
+    workers = min(8, len(alt_symbols))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(_scan_symbol, sym, btc_vec, scan_dir): sym
+            for sym in alt_symbols
+        }
+        for fut in as_completed(futures):
+            n_scanned += 1
+            similar, setup, log = fut.result()
+            if similar:
+                n_similar += 1
+            if setup is not None:
                 valid_setups.append(setup)
-
-        except Exception as exc:
-            print(f"  SKIP {sym}: {exc}", file=sys.stderr)
-
-        time.sleep(0.1)   # rate-limit safety: ~10 req/s budget used by fetch_ohlcv internals
+            if log:
+                with _print_lock:
+                    print(log, flush=True)
 
     # ── Output ────────────────────────────────────────────────────────────────
     valid_setups.sort(key=lambda s: s["rr"], reverse=True)
