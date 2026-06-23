@@ -142,14 +142,14 @@ def _confluence(
         return None
     direction = directions.pop()
 
-    # Zone proximity: any pair of 101 zones within 1 ATR of the 4h ATR
+    # Zone proximity: any pair of entry zones within 1 ATR of the 4h ATR
     atr_val   = atr_scalar(df_4h, config.ATR_PERIOD)
     pred_list = list(preds.values())
     near = False
     for i in range(len(pred_list)):
         for j in range(i + 1, len(pred_list)):
             p1, p2 = pred_list[i], pred_list[j]
-            gap = max(p1["p101_low"], p2["p101_low"]) - min(p1["p101_high"], p2["p101_high"])
+            gap = max(p1["entry_low"], p2["entry_low"]) - min(p1["entry_high"], p2["entry_high"])
             if gap <= atr_val:
                 near = True
                 break
@@ -161,14 +161,17 @@ def _confluence(
     p4  = preds["4h"]
     p1d = preds.get("1d")
     return {
-        "direction":     direction,
-        "conf_tfs":      "+".join(sorted(preds.keys())),
-        "p101_low":      p4["p101_low"],
-        "p101_high":     p4["p101_high"],
-        "p102":          p1d["p102"] if p1d is not None else p4["p102"],
-        "stop":          p4["stop"],
-        "rr":            p4["rr"],
-        "current_price": float(df_4h.iloc[-1]["close"]),
+        "direction":          direction,
+        "conf_tfs":           "+".join(sorted(preds.keys())),
+        "entry_low":          p4["entry_low"],
+        "entry_high":         p4["entry_high"],
+        "target":             p1d["target"] if p1d is not None else p4["target"],
+        "stop":               p4["stop"],
+        "rr":                 p4["rr"],
+        "probability_entry":  p4["probability_entry"],
+        "probability_target": p4["probability_target"],
+        "sample_size":        p4["sample_size"],
+        "current_price":      float(df_4h.iloc[-1]["close"]),
     }
 
 
@@ -308,24 +311,27 @@ def main() -> None:
     valid_setups.sort(key=lambda s: s["rr"], reverse=True)
 
     print()
-    print("=" * 100)
+    print("=" * 110)
     print("VALID SETUPS (sorted by R:R descending)")
-    print("=" * 100)
+    print("=" * 110)
 
     if valid_setups:
         hdr = (
             f"{'SYMBOL':<12} {'DIR':<6}  {'CONF':^9}  "
-            f"{'101_LOW':>10} {'101_HIGH':>10}  {'102':>10}  {'STOP':>10}  {'R:R':>5}  {'PRICE':>12}"
+            f"{'ENTRY_LOW':>10} {'ENTRY_HIGH':>10}  {'TARGET':>10}  {'STOP':>10}  "
+            f"{'R:R':>5}  {'P_ENTRY':>7}  {'P_TARGET':>8}  {'N':>4}  {'PRICE':>12}"
         )
         print(hdr)
-        print("-" * 100)
+        print("-" * 110)
         for s in valid_setups:
             print(
                 f"{s['symbol']:<12} {s['direction'].upper():<6}  "
                 f"{s['conf_tfs']:^9}  "
-                f"{s['p101_low']:>10.2f} {s['p101_high']:>10.2f}  "
-                f"{s['p102']:>10.2f}  {s['stop']:>10.2f}  "
-                f"{s['rr']:>5.2f}  {s['current_price']:>12.2f}"
+                f"{s['entry_low']:>10.2f} {s['entry_high']:>10.2f}  "
+                f"{s['target']:>10.2f}  {s['stop']:>10.2f}  "
+                f"{s['rr']:>5.2f}  {s['probability_entry']:>7.1%}  "
+                f"{s['probability_target']:>8.1%}  {s['sample_size']:>4}  "
+                f"{s['current_price']:>12.2f}"
             )
     else:
         print("No valid setups found.")

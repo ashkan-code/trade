@@ -147,8 +147,8 @@ def replay_pivot_mtf(
             continue
 
         # Merged zone: take 4h zone (the confirmed trigger zone)
-        zone_low  = pred4["p101_low"]
-        zone_high = pred4["p101_high"]
+        zone_low  = pred4["entry_low"]
+        zone_high = pred4["entry_high"]
 
         # Entry trigger: bar wick must touch the 101 zone
         bar = df_4h.iloc[i]
@@ -160,7 +160,7 @@ def replay_pivot_mtf(
                 continue
 
         # Target: 1d wins (deepest structure), else 4h
-        final_tp = pred1d["p102"] if pred1d is not None else pred4["p102"]
+        final_tp = pred1d["target"] if pred1d is not None else pred4["target"]
         final_sl = pred4["stop"]
 
         # Re-check R:R with resolved stop/target
@@ -305,8 +305,8 @@ def replay_pivot_with_trace(
         if not _zones_near(conf_preds, atr_val):
             continue
 
-        zone_low  = pred4["p101_low"]
-        zone_high = pred4["p101_high"]
+        zone_low  = pred4["entry_low"]
+        zone_high = pred4["entry_high"]
 
         bar = df_4h.iloc[i]
         if target_dir == "long":
@@ -316,7 +316,7 @@ def replay_pivot_with_trace(
             if float(bar["high"]) < zone_low:
                 continue
 
-        final_tp  = pred1d["p102"] if pred1d is not None else pred4["p102"]
+        final_tp  = pred1d["target"] if pred1d is not None else pred4["target"]
         final_sl  = pred4["stop"]
         ref_entry = zone_high if target_dir == "long" else zone_low
         risk      = abs(ref_entry - final_sl)
@@ -347,8 +347,8 @@ def replay_pivot_with_trace(
                 "signal_ts":     str(ts),
                 "direction":     target_dir,
                 "conf_tfs":      conf_label,
-                "p101_zone":     (round(zone_low, 2), round(zone_high, 2)),
-                "p102":          round(final_tp, 2),
+                "entry_zone":    (round(zone_low, 2), round(zone_high, 2)),
+                "target":        round(final_tp, 2),
                 "stop":          round(final_sl, 2),
                 "rr_planned":    round(rr, 2),
                 "entry_bar_4h":  i + 1,
@@ -363,11 +363,11 @@ def replay_pivot_with_trace(
 # ── helpers ───────────────────────────────────────────────────────────────────
 
 def _zones_near(preds: list[dict], atr_val: float) -> bool:
-    """True if any pair of 101 zones overlap or are within 1 ATR of each other."""
+    """True if any pair of entry zones overlap or are within 1 ATR of each other."""
     for i in range(len(preds)):
         for j in range(i + 1, len(preds)):
             p1, p2 = preds[i], preds[j]
-            gap = max(p1["p101_low"], p2["p101_low"]) - min(p1["p101_high"], p2["p101_high"])
+            gap = max(p1["entry_low"], p2["entry_low"]) - min(p1["entry_high"], p2["entry_high"])
             if gap <= atr_val:
                 return True
     return False

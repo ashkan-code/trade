@@ -85,20 +85,19 @@ def predict_101_102(
     as_of: int,
     df: pd.DataFrame,
 ) -> dict | None:
-    """Predict 101 (entry zone) and 102 (target) from confirmed causal pivots.
+    """Predict entry zone (101) and target (102) via historical pattern analysis.
 
-    Direction is inferred from swing structure:
-      HH + HL  (last 2 highs rising AND last 2 lows rising) → LONG
-      LH + LL  (last 2 highs falling AND last 2 lows falling) → SHORT
-      Ambiguous → None.
+    Direction inferred from last 2 swing highs/lows:
+      HH + HL → LONG,  LH + LL → SHORT,  else → None.
 
-    101 (LONG) : nearest confirmed swing LOW below current close → entry zone.
-    102 (LONG) : nearest confirmed swing HIGH above current close → target.
-    101 (SHORT): nearest confirmed swing HIGH above current close → entry zone.
-    102 (SHORT): nearest confirmed swing LOW below current close → target.
+    Entry zone: EMA-weighted average pullback % across all historical
+      (swing_low, next_swing_high) pairs for LONG — and the mirror for SHORT.
+      entry_price = close × (1 − avg_pullback_pct); zone = ±0.15 ATR around it.
+    Target: entry_price × (1 + avg_move_pct).
+    Stop: entry_low − SL_BUFFER × ATR.
 
-    Returns None if structure ambiguous, levels absent, or R:R < MIN_RR.
-    No Fibonacci, no hardcoded targets — only real confirmed structural pivots.
+    Returns None if fewer than 5 pattern instances exist or R:R < MIN_RR.
+    No Fibonacci — all statistics derived from real confirmed structural pivots.
     """
     lows  = [p for p in pivots if p.kind == "low"]
     highs = [p for p in pivots if p.kind == "high"]
@@ -126,60 +125,150 @@ def predict_101_102(
     if atr_val <= 0:
         return None
 
+    patterns = _collect_patterns(pivots, direction, df, as_of)
+    if len(patterns) < 5:
+        return None
+
+    sample_size  = len(patterns)
+    avg_pullback = _ema_w([p["pullback_pct"] for p in patterns])
+    avg_move     = _ema_w([p["move_pct"]     for p in patterns])
+
+    probability_entry  = sum(1 for p in patterns if p["reached_entry"])  / sample_size
+    probability_target = sum(1 for p in patterns if p["reached_target"]) / sample_size
+
     if direction == "long":
-        cands_101 = [p for p in lows if p.price < close]
-        if not cands_101:
-            return None
-        p101 = max(cands_101, key=lambda p: p.price)  # nearest low below close
-
-        cands_102 = [p for p in highs if p.price > close]
-        if not cands_102:
-            return None
-        p102 = min(cands_102, key=lambda p: p.price)  # nearest high above close
-
-        entry_low  = p101.price
-        entry_high = p101.price + atr_val * 0.3
-        stop       = p101.price - atr_val * config.SL_BUFFER
-        risk       = entry_high - stop
+        entry_price = close * (1.0 - avg_pullback)
+        entry_low   = entry_price - atr_val * 0.15
+        entry_high  = entry_price + atr_val * 0.15
+        target      = entry_price * (1.0 + avg_move)
+        stop        = entry_low - atr_val * config.SL_BUFFER
+        risk        = entry_high - stop
         if risk <= 0:
             return None
-        rr = (p102.price - entry_high) / risk
-
-    else:  # short
-        cands_101 = [p for p in highs if p.price > close]
-        if not cands_101:
-            return None
-        p101 = min(cands_101, key=lambda p: p.price)  # nearest high above close
-
-        cands_102 = [p for p in lows if p.price < close]
-        if not cands_102:
-            return None
-        p102 = max(cands_102, key=lambda p: p.price)  # nearest low below close
-
-        entry_high = p101.price
-        entry_low  = p101.price - atr_val * 0.3
-        stop       = p101.price + atr_val * config.SL_BUFFER
-        risk       = stop - entry_low
+        rr = (target - entry_high) / risk
+    else:
+        entry_price = close * (1.0 + avg_pullback)
+        entry_high  = entry_price + atr_val * 0.15
+        entry_low   = entry_price - atr_val * 0.15
+        target      = entry_price * (1.0 - avg_move)
+        stop        = entry_high + atr_val * config.SL_BUFFER
+        risk        = stop - entry_low
         if risk <= 0:
             return None
-        rr = (entry_low - p102.price) / risk
+        rr = (entry_low - target) / risk
 
     if rr < config.MIN_RR:
         return None
 
     return {
-        "direction":     direction,
-        "p101_low":      round(entry_low,  6),
-        "p101_high":     round(entry_high, 6),
-        "p102":          round(p102.price, 6),
-        "stop":          round(stop,       6),
-        "rr":            round(rr,         4),
-        "pivot_101_idx": p101.index,
-        "pivot_102_idx": p102.index,
+        "direction":          direction,
+        "entry_low":          round(entry_low,          6),
+        "entry_high":         round(entry_high,         6),
+        "target":             round(target,             6),
+        "stop":               round(stop,               6),
+        "rr":                 round(rr,                 4),
+        "probability_entry":  round(probability_entry,  4),
+        "probability_target": round(probability_target, 4),
+        "sample_size":        sample_size,
     }
 
 
 # ── private helpers ────────────────────────────────────────────────────────────
+
+def _collect_patterns(
+    pivots: list[Pivot],
+    direction: Direction,
+    df: pd.DataFrame,
+    as_of: int,
+) -> list[dict]:
+    """Collect historical pullback/move instances for the given direction.
+
+    LONG: each (swing_low, nearest_next_swing_high) pair.
+    SHORT: each (swing_high, nearest_next_swing_low) pair.
+    Causal: only reads df.iloc[:as_of+1]; all pivots already confirmed ≤ as_of.
+    """
+    patterns: list[dict] = []
+
+    if direction == "long":
+        lows_s  = sorted([p for p in pivots if p.kind == "low"],  key=lambda p: p.index)
+        highs_s = sorted([p for p in pivots if p.kind == "high"], key=lambda p: p.index)
+
+        for l_curr in lows_s:
+            h_nexts = [h for h in highs_s if h.index > l_curr.index]
+            if not h_nexts:
+                continue
+            h_next = h_nexts[0]
+
+            signal_bar   = l_curr.confirm_index
+            signal_close = float(df.iloc[signal_bar]["close"])
+            if signal_close <= 0 or l_curr.price <= 0:
+                continue
+
+            pullback_pct = (signal_close - l_curr.price) / signal_close
+            if pullback_pct <= 0:
+                continue
+
+            move_pct = (h_next.price - l_curr.price) / l_curr.price
+            if move_pct <= 0:
+                continue
+
+            end_bar  = min(h_next.confirm_index, as_of)
+            segment  = df.iloc[signal_bar : end_bar + 1]
+            patterns.append({
+                "pullback_pct":   pullback_pct,
+                "move_pct":       move_pct,
+                "reached_entry":  bool((segment["low"]  <= l_curr.price).any()),
+                "reached_target": bool((segment["high"] >= h_next.price).any()),
+            })
+
+    else:  # short
+        highs_s = sorted([p for p in pivots if p.kind == "high"], key=lambda p: p.index)
+        lows_s  = sorted([p for p in pivots if p.kind == "low"],  key=lambda p: p.index)
+
+        for h_curr in highs_s:
+            l_nexts = [l for l in lows_s if l.index > h_curr.index]
+            if not l_nexts:
+                continue
+            l_next = l_nexts[0]
+
+            signal_bar   = h_curr.confirm_index
+            signal_close = float(df.iloc[signal_bar]["close"])
+            if signal_close <= 0 or h_curr.price <= 0:
+                continue
+
+            pullback_pct = (h_curr.price - signal_close) / signal_close
+            if pullback_pct <= 0:
+                continue
+
+            move_pct = (h_curr.price - l_next.price) / h_curr.price
+            if move_pct <= 0:
+                continue
+
+            end_bar  = min(l_next.confirm_index, as_of)
+            segment  = df.iloc[signal_bar : end_bar + 1]
+            patterns.append({
+                "pullback_pct":   pullback_pct,
+                "move_pct":       move_pct,
+                "reached_entry":  bool((segment["high"] >= h_curr.price).any()),
+                "reached_target": bool((segment["low"]  <= l_next.price).any()),
+            })
+
+    return patterns
+
+
+def _ema_w(values: list[float]) -> float:
+    """EMA-weighted average. Most recent element (end of list) has highest weight."""
+    n = len(values)
+    if n == 0:
+        return 0.0
+    if n == 1:
+        return values[0]
+    alpha = 2.0 / (n + 1)
+    ema = values[0]
+    for v in values[1:]:
+        ema = alpha * v + (1.0 - alpha) * ema
+    return ema
+
 
 def _atr(df: pd.DataFrame, as_of: int) -> float:
     """Average True Range over config.ATR_PERIOD candles ending at as_of (causal)."""
