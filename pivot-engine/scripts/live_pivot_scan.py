@@ -39,9 +39,9 @@ from engine.ict import atr_scalar
 from contracts import Pivot
 
 # Candle limits per symbol (RAM-safe: process one at a time)
-_LIMIT_4H: int = 300
-_LIMIT_1H: int = 500
-_LIMIT_1D: int = 120
+_LIMIT_4H: int = 1000
+_LIMIT_1H: int = 1500
+_LIMIT_1D: int = 365
 
 
 # ── Layer 0 helpers ───────────────────────────────────────────────────────────

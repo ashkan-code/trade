@@ -14,7 +14,7 @@ FVG_BODY_PERC: float = 0.36    # midcandle body / range must be >= this to form 
 ATR_PERIOD: int = 14
 ATR_5m_PERIOD: int = 14
 MIN_LB: int = 3
-MAX_LB: int = 20
+MAX_LB: int = 10
 SWEEP_MAX_CANDLES: int = 2      # kept for backward compat
 
 # Gate 2 — sweep detection (ICT/Wyckoff)
