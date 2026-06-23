@@ -176,12 +176,11 @@ def _confluence(
 
 def _scan_symbol(
     sym: str,
-    btc_vec: list[float] | None,
     scan_dir: str | None,
 ) -> tuple[bool, dict | None, str]:
-    """Layer 1 + 2 for a single symbol.
+    """Layer 2 for a single symbol.
 
-    Returns (passed_layer1, setup_or_None, log_line).
+    Returns (fetched_ok, setup_or_None, log_line).
     Thread-safe: no shared mutable state written here.
     """
     try:
@@ -189,22 +188,9 @@ def _scan_symbol(
         if df_4h is None or len(df_4h) < config.WARMUP + 10:
             return False, None, ""
 
-        as_of   = len(df_4h) - 1
-        lb      = adaptive_lookback(df_4h, as_of)
-        pivs    = find_pivots(df_4h, as_of, lb)
-        sym_vec = _pivot_vector(pivs, config.SIMILARITY_PIVOTS)
-
-        # LAYER 1 — similarity gate
-        if btc_vec is not None:
-            if sym_vec is None:
-                return False, None, ""
-            sim = _pearson(btc_vec, sym_vec)
-            if sim < config.SIMILARITY_MIN:
-                return False, None, ""
-        else:
-            sim = float("nan")
-
-        sim_str = f"{sim:.3f}" if sim == sim else "N/A"  # nan-safe
+        as_of = len(df_4h) - 1
+        lb    = adaptive_lookback(df_4h, as_of)
+        pivs  = find_pivots(df_4h, as_of, lb)
 
         # LAYER 2 — fetch remaining TFs and run confluence
         df_1h = fetch_ohlcv(sym, "1h", limit=_LIMIT_1H)
@@ -213,13 +199,12 @@ def _scan_symbol(
         del df_4h, df_1h, df_1d  # free RAM immediately (Termux-safe)
 
         if setup is None:
-            log = f"  {sym:<12}  sim={sim_str}  pivots={len(pivs)}  no confluence"
+            log = f"  {sym:<12}  pivots={len(pivs)}  no confluence"
             return True, None, log
 
-        setup["symbol"]     = sym
-        setup["similarity"] = round(sim, 3) if sim == sim else None
+        setup["symbol"] = sym
         log = (
-            f"  {sym:<12}  sim={sim_str}  pivots={len(pivs)}"
+            f"  {sym:<12}  pivots={len(pivs)}"
             f"  SIGNAL {setup['direction'].upper()} R:R={setup['rr']:.2f}"
         )
         return True, setup, log
@@ -270,12 +255,8 @@ def main() -> None:
         n_piv_1d = len(find_pivots(df_btc_1d, aoi, adaptive_lookback(df_btc_1d, aoi)))
 
     btc_bias = _btc_bias(btc_piv4)
-    btc_vec  = _pivot_vector(btc_piv4, config.SIMILARITY_PIVOTS)
 
     print(f"BTC bias: {btc_bias.upper()} | pivots: 4h={len(btc_piv4)} 1h={n_piv_1h} 1d={n_piv_1d}")
-    if btc_vec is None:
-        print(f"WARN: BTC has only {len(btc_piv4)} pivots — need >{config.SIMILARITY_PIVOTS}.")
-        print("Similarity filter disabled; all symbols with enough pivots will proceed.")
 
     # Effective scan direction: CLI flag overrides BTC bias
     if forced_dir is not None:
@@ -305,21 +286,18 @@ def main() -> None:
 
     # ── Parallel per-symbol scan ──────────────────────────────────────────────
     n_scanned    = 0
-    n_similar    = 0
     valid_setups: list[dict] = []
     _print_lock  = threading.Lock()
 
     workers = min(8, len(alt_symbols))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         futures = {
-            pool.submit(_scan_symbol, sym, btc_vec, scan_dir): sym
+            pool.submit(_scan_symbol, sym, scan_dir): sym
             for sym in alt_symbols
         }
         for fut in as_completed(futures):
             n_scanned += 1
-            similar, setup, log = fut.result()
-            if similar:
-                n_similar += 1
+            _, setup, log = fut.result()
             if setup is not None:
                 valid_setups.append(setup)
             if log:
@@ -330,21 +308,20 @@ def main() -> None:
     valid_setups.sort(key=lambda s: s["rr"], reverse=True)
 
     print()
-    print("=" * 110)
+    print("=" * 100)
     print("VALID SETUPS (sorted by R:R descending)")
-    print("=" * 110)
+    print("=" * 100)
 
     if valid_setups:
         hdr = (
-            f"{'SYMBOL':<12} {'DIR':<6} {'SIM':>6}  {'CONF':^9}  "
+            f"{'SYMBOL':<12} {'DIR':<6}  {'CONF':^9}  "
             f"{'101_LOW':>10} {'101_HIGH':>10}  {'102':>10}  {'STOP':>10}  {'R:R':>5}  {'PRICE':>12}"
         )
         print(hdr)
-        print("-" * 110)
+        print("-" * 100)
         for s in valid_setups:
-            sim_d = f"{s['similarity']:.3f}" if s["similarity"] is not None else "  N/A"
             print(
-                f"{s['symbol']:<12} {s['direction'].upper():<6} {sim_d:>6}  "
+                f"{s['symbol']:<12} {s['direction'].upper():<6}  "
                 f"{s['conf_tfs']:^9}  "
                 f"{s['p101_low']:>10.2f} {s['p101_high']:>10.2f}  "
                 f"{s['p102']:>10.2f}  {s['stop']:>10.2f}  "
@@ -355,7 +332,7 @@ def main() -> None:
 
     print()
     print(
-        f"Scanned {n_scanned} | Similar to BTC: {n_similar} | Valid setups: {len(valid_setups)}"
+        f"Scanned {n_scanned} | Valid setups: {len(valid_setups)}"
     )
 
 
