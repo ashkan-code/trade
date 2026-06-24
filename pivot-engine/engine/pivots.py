@@ -84,6 +84,7 @@ def predict_101_102(
     pivots: list[Pivot],
     as_of: int,
     df: pd.DataFrame,
+    max_distance_pct: float | None = None,
 ) -> dict | None:
     """Predict entry zone (101) and target (102) via historical pattern analysis.
 
@@ -95,6 +96,10 @@ def predict_101_102(
       entry_price = close × (1 − avg_pullback_pct); zone = ±0.15 ATR around it.
     Target: entry_price × (1 + avg_move_pct).
     Stop: entry_low − SL_BUFFER × ATR.
+
+    max_distance_pct: when set, only patterns whose anchor swing is within this
+      % of the current close are used (LONG: swing_low >= close*(1-pct/100);
+      SHORT: swing_high <= close*(1+pct/100)). If no patterns survive, returns None.
 
     Returns None if fewer than 5 pattern instances exist or R:R < MIN_RR.
     No Fibonacci — all statistics derived from real confirmed structural pivots.
@@ -125,7 +130,9 @@ def predict_101_102(
     if atr_val <= 0:
         return None
 
-    patterns = _collect_patterns(pivots, direction, df, as_of)
+    patterns = _collect_patterns(pivots, direction, df, as_of,
+                                  max_distance_pct=max_distance_pct,
+                                  current_close=close)
     if len(patterns) < 5:
         return None
 
@@ -180,12 +187,18 @@ def _collect_patterns(
     direction: Direction,
     df: pd.DataFrame,
     as_of: int,
+    max_distance_pct: float | None = None,
+    current_close: float = 0.0,
 ) -> list[dict]:
     """Collect historical pullback/move instances for the given direction.
 
     LONG: each (swing_low, nearest_next_swing_high) pair.
     SHORT: each (swing_high, nearest_next_swing_low) pair.
     Causal: only reads df.iloc[:as_of+1]; all pivots already confirmed ≤ as_of.
+
+    max_distance_pct / current_close: when set, skips swings whose price is
+      further than max_distance_pct% from current_close (LONG: too far below;
+      SHORT: too far above). Allows callers to request only nearby-entry patterns.
     """
     patterns: list[dict] = []
 
@@ -194,6 +207,11 @@ def _collect_patterns(
         highs_s = sorted([p for p in pivots if p.kind == "high"], key=lambda p: p.index)
 
         for l_curr in lows_s:
+            # Distance gate: swing low must be within max_distance_pct% below close
+            if (max_distance_pct is not None and current_close > 0
+                    and l_curr.price < current_close * (1.0 - max_distance_pct / 100.0)):
+                continue
+
             h_nexts = [h for h in highs_s if h.index > l_curr.index]
             if not h_nexts:
                 continue
@@ -226,6 +244,11 @@ def _collect_patterns(
         lows_s  = sorted([p for p in pivots if p.kind == "low"],  key=lambda p: p.index)
 
         for h_curr in highs_s:
+            # Distance gate: swing high must be within max_distance_pct% above close
+            if (max_distance_pct is not None and current_close > 0
+                    and h_curr.price > current_close * (1.0 + max_distance_pct / 100.0)):
+                continue
+
             l_nexts = [l for l in lows_s if l.index > h_curr.index]
             if not l_nexts:
                 continue
