@@ -375,8 +375,8 @@ def _classify_setups(setups: list[dict]) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Scalp pivot scanner 15m/30m/1h")
-    parser.add_argument("--top",   type=int, default=None,
-                        help="Scan top-N symbols by 24h USDT volume (default: all)")
+    parser.add_argument("--top",   type=int, default=300,
+                        help="Scan top-N symbols by 24h USDT volume (default: 300)")
     parser.add_argument("--long",  action="store_true", help="Long setups only")
     parser.add_argument("--short", action="store_true", help="Short setups only")
     args = parser.parse_args()
