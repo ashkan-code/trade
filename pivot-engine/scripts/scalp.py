@@ -51,7 +51,7 @@ _LIMIT_15M: int = 500
 
 # Local MAX_LB override for scalp TFs — wider window to find more structure.
 # config.py is NOT modified (config.MAX_LB remains 10).
-_SCALP_MAX_LB: int = 50
+_SCALP_MAX_LB: int = 20
 _SCALP_MIN_LB: int = config.MIN_LB   # 3
 
 # Bitunix single-ticker endpoint for live price
