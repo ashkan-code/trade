@@ -389,42 +389,11 @@ def main() -> None:
 
     print(f"=== MICRO SCALP SCANNER 3m/5m/15m  |  {_now_tehran()} ===")
 
-    # ── Layer 0: BTC bias on 15m (highest micro TF) ──────────────────────────
-    print("\n=== LAYER 0: BTC bias (15m) ===")
-    df_btc_15m = fetch_ohlcv("BTCUSDT", "15m", limit=_LIMIT_15M)
-    df_btc_5m  = fetch_ohlcv("BTCUSDT", "5m",  limit=_LIMIT_5M)
-    df_btc_3m  = fetch_ohlcv("BTCUSDT", "3m",  limit=_LIMIT_3M)
-
-    if df_btc_15m is None:
-        print("FAIL: BTC 15m data unavailable — check network / API access. Aborting.")
-        sys.exit(1)
-
-    aoi_15m  = len(df_btc_15m) - 1
-    lb_15m   = _adaptive_lookback_micro(df_btc_15m, aoi_15m)
-    piv_15m  = find_pivots(df_btc_15m, aoi_15m, lb_15m)
-    btc_bias = _btc_bias(piv_15m)
-
-    n_piv_5m = n_piv_3m = 0
-    if df_btc_5m is not None:
-        aoi = len(df_btc_5m) - 1
-        n_piv_5m = len(find_pivots(df_btc_5m, aoi, _adaptive_lookback_micro(df_btc_5m, aoi)))
-    if df_btc_3m is not None:
-        aoi = len(df_btc_3m) - 1
-        n_piv_3m = len(find_pivots(df_btc_3m, aoi, _adaptive_lookback_micro(df_btc_3m, aoi)))
-
-    print(f"BTC bias: {btc_bias.upper()} | pivots: 15m={len(piv_15m)} 5m={n_piv_5m} 3m={n_piv_3m}")
-
-    if forced_dir is not None:
-        scan_dir = forced_dir
+    scan_dir = forced_dir  # None = both directions unless --long/--short given
+    if scan_dir is not None:
         print(f"Direction forced: {scan_dir.upper()}")
-    elif btc_bias != "neutral":
-        scan_dir = btc_bias
-        print(f"Direction from BTC bias: {scan_dir.upper()}")
     else:
-        scan_dir = None
-        print("BTC bias: NEUTRAL — scanning both directions")
-
-    del df_btc_3m, df_btc_5m, df_btc_15m
+        print("Scanning both directions")
 
     # ── Symbol list ───────────────────────────────────────────────────────────
     print("\n=== LAYER 1: Symbol list ===")
