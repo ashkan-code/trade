@@ -51,7 +51,7 @@ _LIMIT_3M:  int = 500
 
 # Local MAX_LB override for micro TFs — wider window to filter noise.
 # config.py MAX_LB (=10) is not touched.
-_MICRO_MAX_LB: int = 40
+_MICRO_MAX_LB: int = 15
 _MICRO_MIN_LB: int = config.MIN_LB   # 3
 
 # Bitunix single-ticker endpoint for live price
