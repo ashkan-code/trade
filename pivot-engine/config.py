@@ -88,3 +88,7 @@ ATR_WEAK_MULT: float = 0.8     # body < ATR × this → confluence_stars −1 (w
 # Network
 RETRY_ATTEMPTS: int = 3
 RETRY_DELAYS: list[int] = [5, 10, 30]
+
+# Telegram alerts
+TELEGRAM_TOKEN: str = "8856332073:AAFTQs0NhEh3PoUsRw9YXRuJfTBJvkBh0bg"
+TELEGRAM_CHAT_ID: str = "554649373"
