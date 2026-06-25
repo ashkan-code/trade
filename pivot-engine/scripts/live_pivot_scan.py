@@ -175,6 +175,42 @@ def _confluence(
     }
 
 
+# ── anti-range filter ─────────────────────────────────────────────────────────
+
+def _is_ranging_4h(df: pd.DataFrame) -> bool:
+    """Return True if >=2 of 3 range checks fire on 4h data -> symbol is choppy.
+
+    Filter 1 — Body ratio: avg(|open-close|) / avg(high-low) on last 10 bars < 40%
+    Filter 2 — HL range:   (max_high - min_low) / price on last 20 bars < 3%
+    Filter 3 — EMA slope:  |EMA20[-1] - EMA20[-6]| / EMA20[-6] < 0.1%
+    """
+    n_range = 0
+
+    # Filter 1
+    last10     = df.iloc[-10:]
+    bodies     = (last10["close"] - last10["open"]).abs()
+    bar_ranges = last10["high"] - last10["low"]
+    avg_range  = bar_ranges.mean()
+    if avg_range > 0 and (bodies.mean() / avg_range) < 0.40:
+        n_range += 1
+
+    # Filter 2
+    last20   = df.iloc[-20:]
+    hl_range = last20["high"].max() - last20["low"].min()
+    price    = float(df.iloc[-1]["close"])
+    if price > 0 and (hl_range / price) < 0.03:
+        n_range += 1
+
+    # Filter 3
+    if len(df) >= config.WARMUP:
+        ema20 = df["close"].ewm(span=20, adjust=False).mean()
+        ref   = float(ema20.iloc[-6])
+        if ref > 0 and abs((float(ema20.iloc[-1]) - ref) / ref) < 0.001:
+            n_range += 1
+
+    return n_range >= 2
+
+
 # ── per-symbol worker (runs inside ThreadPoolExecutor) ────────────────────────
 
 def _scan_symbol(
@@ -207,6 +243,7 @@ def _scan_symbol(
             _avgv = float(np.mean(_vols[-20:])) if len(_vols) >= 20 else float(np.mean(_vols))
             setup["atr_pct"]   = round((_atr / _cl * 100.0) if _cl > 0 else 0.0, 4)
             setup["vol_ratio"] = round(float(_vols[-1]) / _avgv if _avgv > 0 else 0.0, 4)
+            setup["ranging"]   = _is_ranging_4h(df_4h)
 
         del df_4h, df_1h, df_1d  # free RAM immediately (Termux-safe)
 
@@ -343,6 +380,7 @@ def main() -> None:
                     print(log, flush=True)
 
     # ── Output ────────────────────────────────────────────────────────────────
+    valid_setups = [s for s in valid_setups if not s.get("ranging", False)]
     valid_setups.sort(key=lambda s: s["rr"], reverse=True)
 
     print()
