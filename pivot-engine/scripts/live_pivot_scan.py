@@ -31,6 +31,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
+import pandas as pd
 
 import config
 from data.fetcher import fetch_ohlcv, get_all_symbols, get_top_symbols
