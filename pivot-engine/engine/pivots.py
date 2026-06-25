@@ -133,7 +133,7 @@ def predict_101_102(
     patterns = _collect_patterns(pivots, direction, df, as_of,
                                   max_distance_pct=max_distance_pct,
                                   current_close=close)
-    if len(patterns) < 5:
+    if len(patterns) < 2:
         return None
 
     sample_size  = len(patterns)
