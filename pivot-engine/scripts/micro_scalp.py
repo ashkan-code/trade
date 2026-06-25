@@ -209,7 +209,7 @@ def _micro_confluence(
         pivs  = find_pivots(df, as_of, lb)
         if label == "15m":
             pivots_15m = pivs
-        pred  = predict_101_102(pivs, as_of, df, max_distance_pct=1.0)
+        pred  = predict_101_102(pivs, as_of, df, max_distance_pct=5.0)
         if pred is None:
             continue
         if allowed_dir is not None and pred["direction"] != allowed_dir:
