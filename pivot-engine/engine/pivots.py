@@ -20,8 +20,9 @@ def find_pivots(df: pd.DataFrame, as_of: int, lookback: int) -> list[Pivot]:
     A swing high mirrors the above using high values.
     """
     view = df.iloc[: as_of + 1]
-    lows = view["low"].to_numpy()
-    highs = view["high"].to_numpy()
+    lows    = view["low"].to_numpy()
+    highs   = view["high"].to_numpy()
+    volumes = view["volume"].to_numpy()
     n = len(view)
     pivots: list[Pivot] = []
 
@@ -33,13 +34,15 @@ def find_pivots(df: pd.DataFrame, as_of: int, lookback: int) -> list[Pivot]:
         window_l = np.concatenate([lows[i - lookback : i], lows[i + 1 : i + lookback + 1]])
         if lows[i] < window_l.min():
             pivots.append(
-                Pivot(index=i, confirm_index=confirm_idx, price=float(lows[i]), kind="low")
+                Pivot(index=i, confirm_index=confirm_idx, price=float(lows[i]), kind="low",
+                      volume=float(volumes[i]))
             )
 
         window_h = np.concatenate([highs[i - lookback : i], highs[i + 1 : i + lookback + 1]])
         if highs[i] > window_h.max():
             pivots.append(
-                Pivot(index=i, confirm_index=confirm_idx, price=float(highs[i]), kind="high")
+                Pivot(index=i, confirm_index=confirm_idx, price=float(highs[i]), kind="high",
+                      volume=float(volumes[i]))
             )
 
     pivots.sort(key=lambda p: p.index)

@@ -12,6 +12,7 @@ class Pivot:
     confirm_index: int    # candle index where pivot was confirmed (always <= as_of)
     price: float
     kind: Literal["high", "low"]
+    volume: float = 0.0   # volume of the candle at index
 
 
 @dataclass(frozen=True)
