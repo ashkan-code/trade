@@ -85,6 +85,9 @@ BTC_SCORE_SHORT: int = -2    # score <= this → SHORT
 ATR_STRONG_MULT: float = 1.5   # body > ATR × this → confluence_stars +1 (strong momentum)
 ATR_WEAK_MULT: float = 0.8     # body < ATR × this → confluence_stars −1 (weak momentum)
 
+# Scanner — pivot quality gate
+MIN_PIVOTS: int = 50     # minimum confirmed pivots on 15m before confluence check
+
 # Network
 RETRY_ATTEMPTS: int = 3
 RETRY_DELAYS: list[int] = [5, 10, 30]
