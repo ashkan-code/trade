@@ -288,6 +288,67 @@ def _scalp_confluence(
     }
 
 
+# ── Composite score ───────────────────────────────────────────────────────────
+
+def _composite_score(setup: dict, pivots: list, df: pd.DataFrame) -> float:
+    """Composite 0–100 ranking score. Higher = better setup.
+
+    Component 1 — R:R (weight 30):
+        0 at MIN_RR, 1 at 2×MIN_RR; clipped above.
+    Component 2 — distance to nearest confirmed pivot (weight 30):
+        Closer pivot to entry_ref → higher score (structural validation).
+        0% away = 30 pts, 5%+ away = 0 pts, linear.
+    Component 3 — nearby pivot volume ratio (weight 20):
+        avg volume of pivots within 3% of entry / avg volume of all pivots.
+        ratio 3× or above = full 20 pts.
+    Component 4 — path cleanliness (weight 20):
+        In historical bars where close was between entry and target,
+        cleanliness = |close_last − close_first| / Σ|close[i]−close[i−1]|.
+        1.0 = perfectly straight, no reversals.
+    """
+    direction = setup["direction"]
+    entry_ref = setup["entry_high"] if direction == "long" else setup["entry_low"]
+    target    = setup["target"]
+    rr        = setup["rr"]
+
+    # 1 — R:R
+    s_rr = min(max((rr - config.MIN_RR) / config.MIN_RR, 0.0), 1.0) * 30.0
+
+    # 2 — nearest pivot distance
+    if pivots:
+        min_dist = min(abs(p.price - entry_ref) / max(entry_ref, 1e-9) for p in pivots)
+        s_dist   = max(0.0, 1.0 - min_dist / 0.05) * 30.0
+    else:
+        s_dist = 0.0
+
+    # 3 — nearby pivot volume ratio
+    band        = 0.03
+    nearby_vols = [p.volume for p in pivots
+                   if abs(p.price - entry_ref) / max(entry_ref, 1e-9) <= band and p.volume > 0]
+    all_vols    = [p.volume for p in pivots if p.volume > 0]
+    if nearby_vols and all_vols:
+        avg_nearby = sum(nearby_vols) / len(nearby_vols)
+        avg_all    = sum(all_vols)    / len(all_vols)
+        s_vol      = min(avg_nearby / max(avg_all, 1e-9) / 3.0, 1.0) * 20.0
+    else:
+        s_vol = 10.0  # neutral when no data
+
+    # 4 — path cleanliness
+    lo     = min(entry_ref, target)
+    hi     = max(entry_ref, target)
+    closes = df["close"].to_numpy()
+    mask   = (closes >= lo) & (closes <= hi)
+    seg    = closes[mask]
+    if len(seg) >= 2:
+        total_path  = float(np.sum(np.abs(np.diff(seg))))
+        direct      = abs(float(seg[-1]) - float(seg[0]))
+        s_clean     = min(direct / max(total_path, 1e-9), 1.0) * 20.0
+    else:
+        s_clean = 10.0  # neutral when price hasn't been in this zone yet
+
+    return round(s_rr + s_dist + s_vol + s_clean, 2)
+
+
 # ── Per-symbol worker ─────────────────────────────────────────────────────────
 
 def _scan_symbol_scalp(
@@ -329,6 +390,9 @@ def _scan_symbol_scalp(
             setup["current_price"] = live_p if live_p else _cl
             setup["price_source"]  = "ticker" if live_p else "close"
             setup["ts_tehran"]     = datetime.now(_TEHRAN).strftime("%Y-%m-%d %H:%M")  # type: ignore[arg-type]
+
+            # Composite ranking score (uses df_15m + _pivs15 before they are freed)
+            setup["score"] = _composite_score(setup, _pivs15, df_15m)
 
         del df_15m, df_30m, df_1h
 
@@ -465,24 +529,25 @@ def main() -> None:
                     print(log, flush=True)
 
     # ── Output ────────────────────────────────────────────────────────────────
-    valid_setups.sort(key=lambda s: s["rr"], reverse=True)
+    valid_setups.sort(key=lambda s: s.get("score", 0.0), reverse=True)
 
     print()
-    print("=" * 130)
-    print(f"VALID SCALP SETUPS (sorted by R:R descending)  |  {_now_tehran()}")
-    print("=" * 130)
+    print("=" * 140)
+    print(f"VALID SCALP SETUPS (sorted by composite score descending)  |  {_now_tehran()}")
+    print("=" * 140)
 
     if valid_setups:
         hdr = (
-            f"{'SYMBOL':<12} {'DIR':<6}  {'CONF':<22}  "
+            f"{'SCORE':>6}  {'SYMBOL':<12} {'DIR':<6}  {'CONF':<22}  "
             f"{'ENTRY_LOW':>10} {'ENTRY_HIGH':>10}  {'TARGET':>10}  {'STOP':>10}  "
             f"{'R:R':>5}  {'P_ENTRY':>7}  {'P_TARGET':>8}  {'N':>4}  "
             f"{'PRICE':>12}  {'SRC':<6}  {'TS (Tehran)'}"
         )
         print(hdr)
-        print("-" * 130)
+        print("-" * 140)
         for s in valid_setups:
             print(
+                f"{s.get('score', 0.0):>6.1f}  "
                 f"{s['symbol']:<12} {s['direction'].upper():<6}  "
                 f"{s['conf_tfs']:<22}  "
                 f"{s['entry_low']:>10.4f} {s['entry_high']:>10.4f}  "
