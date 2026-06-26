@@ -11,7 +11,7 @@ class Pivot:
     index: int            # candle index where pivot occurred
     confirm_index: int    # candle index where pivot was confirmed (always <= as_of)
     price: float
-    kind: Literal["high", "low"]
+    kind: Literal["high", "low", "minor_high", "minor_low"]
     volume: float = 0.0   # volume of the candle at index
 
 

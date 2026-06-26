@@ -46,6 +46,36 @@ def find_pivots(df: pd.DataFrame, as_of: int, lookback: int) -> list[Pivot]:
             )
 
     pivots.sort(key=lambda p: p.index)
+
+    # Minor pivots: meaningful pullbacks with above-average volume
+    minor_lb      = max(2, lookback // 3)
+    major_indices = {p.index for p in pivots}
+
+    for i in range(minor_lb, n - minor_lb):
+        confirm_idx = i + minor_lb
+        if confirm_idx > as_of:
+            break
+        if i in major_indices:
+            continue
+        vol_start = max(0, i - 20)
+        vol_mean  = float(np.mean(volumes[vol_start:i])) if i > vol_start else float(volumes[i])
+        if volumes[i] <= vol_mean:
+            continue
+        window_l_m = np.concatenate([lows[i - minor_lb : i], lows[i + 1 : i + minor_lb + 1]])
+        if lows[i] < window_l_m.min():
+            pivots.append(
+                Pivot(index=i, confirm_index=confirm_idx, price=float(lows[i]),
+                      kind="minor_low", volume=float(volumes[i]))
+            )
+            continue  # a candle can't be both a minor low and a minor high
+        window_h_m = np.concatenate([highs[i - minor_lb : i], highs[i + 1 : i + minor_lb + 1]])
+        if highs[i] > window_h_m.max():
+            pivots.append(
+                Pivot(index=i, confirm_index=confirm_idx, price=float(highs[i]),
+                      kind="minor_high", volume=float(volumes[i]))
+            )
+
+    pivots.sort(key=lambda p: p.index)
     return pivots
 
 

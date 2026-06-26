@@ -77,6 +77,7 @@ def _pivot_vector(pivots: list[Pivot], n_changes: int) -> list[float] | None:
     the same rhythm produce the same vector shape.
     Returns None if too few pivots.
     """
+    pivots = [p for p in pivots if p.kind in ("low", "high")]
     if len(pivots) < n_changes + 1:
         return None
     tail   = pivots[-(n_changes + 1):]

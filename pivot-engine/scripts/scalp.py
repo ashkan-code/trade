@@ -367,9 +367,10 @@ def _scan_symbol_scalp(
 
         # Pivot count gate on 15m — skip symbols with too few structural pivots
         _as_of15 = len(df_15m) - 1
-        _pivs15  = find_pivots(df_15m, _as_of15, _adaptive_lookback_scalp(df_15m, _as_of15))
-        if len(_pivs15) < config.MIN_PIVOTS:
-            return True, None, f"  {sym:<12}  pivots={len(_pivs15)}  pivots insufficient — skip"
+        _pivs15       = find_pivots(df_15m, _as_of15, _adaptive_lookback_scalp(df_15m, _as_of15))
+        _major_pivs15 = [p for p in _pivs15 if p.kind in ("low", "high")]
+        if len(_major_pivs15) < config.MIN_PIVOTS:
+            return True, None, f"  {sym:<12}  pivots={len(_major_pivs15)}  pivots insufficient — skip"
 
         df_30m = fetch_ohlcv(sym, "30m", limit=_LIMIT_30M)
         df_1h  = fetch_ohlcv(sym, "1h",  limit=_LIMIT_1H)
